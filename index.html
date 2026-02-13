@@ -1,0 +1,131 @@
+<!doctype html><html><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CAMTEL Budget</title>
+<style>
+body{font-family:Arial;margin:0;background:#f6f7fb;color:#111827}
+header{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#fff;border-bottom:1px solid #e5e7eb}
+.container{max-width:1180px;margin:14px auto;padding:0 14px}
+.card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+label{font-size:12px;color:#374151;display:block;margin-bottom:4px}
+input,select{width:100%;padding:9px;border:1px solid #d1d5db;border-radius:8px;font-size:13px}
+button{padding:9px 12px;border:0;border-radius:8px;background:#0b5fff;color:#fff;font-weight:700;cursor:pointer}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th,td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left}
+th{background:#f9fafb}
+.small{font-size:12px;color:#6b7280}
+</style></head>
+<body>
+<header><div style="display:flex;gap:10px;align-items:center">
+  <img src="/static/assets/camtel_blue.png" style="height:34px" onerror="this.style.display='none'">
+  <div style="font-weight:900">CAMTEL Budget (Online Test)</div>
+</div><div><a href="/logout">Logout</a></div></header>
+
+<div class="container">
+  <div class="card">
+    <div class="grid2">
+      <div><label>Date</label><input id="date" type="date"></div>
+      <div><label>Direction</label><select id="dir"></select></div>
+      <div><label>Doc</label><select id="doc"><option>OM</option><option>BC</option><option>NC</option></select></div>
+      <div><label>Amount TTC</label><input id="amount" type="number"></div>
+      <div style="grid-column:1/-1"><label>Budget line</label><select id="line"></select></div>
+      <div><label>Account</label><input id="acct" disabled></div>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:8px">
+      <button id="save">Save</button>
+      <button id="reload" style="background:#111827">Reload Budgets</button>
+    </div>
+    <div class="small" id="msg"></div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <div style="display:flex;gap:10px;align-items:end">
+      <div style="flex:1"><label>Year</label><input id="fy" type="number" value="2025"></div>
+      <div style="flex:1"><label>Direction (optional)</label><input id="fd" placeholder="e.g. BUM"></div>
+      <div><button id="load" style="background:#111827">Load</button></div>
+    </div>
+    <div style="margin-top:10px;overflow:auto;max-height:55vh">
+      <table><thead><tr><th>ID</th><th>Date</th><th>Dir</th><th>Doc</th><th>Amount</th><th>Budget line</th></tr></thead>
+      <tbody id="tb"></tbody></table>
+    </div>
+  </div>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const fmt=n=>(Math.round(Number(n||0))).toLocaleString('fr-FR');
+
+async function api(path, opts){
+  const r = await fetch(path, opts||{});
+  if(!r.ok) throw new Error(await r.text());
+  const ct=r.headers.get("content-type")||"";
+  return ct.includes("application/json") ? r.json() : r.text();
+}
+
+let budgets=[];
+function parseAcct(linekey){
+  const m = String(linekey||"").match(/\/(\d{6,10})/g);
+  if(!m) return "";
+  return m[m.length-1].replace("/","");
+}
+
+async function init(){
+  $("date").value = new Date().toISOString().slice(0,10);
+  await loadDirs();
+  await loadBudgets();
+  $("dir").addEventListener("change", ()=>fillLines($("dir").value));
+  $("line").addEventListener("change", ()=> $("acct").value = parseAcct($("line").value));
+  $("save").addEventListener("click", saveTx);
+  $("load").addEventListener("click", loadTx);
+  $("reload").addEventListener("click", async ()=>{ await loadBudgets(); });
+  await loadTx();
+}
+
+async function loadDirs(){
+  const dirs = await api("/api/directions?year=2025");
+  $("dir").innerHTML = dirs.map(d=>`<option>${d}</option>`).join("");
+}
+
+async function loadBudgets(){
+  budgets = await api("/api/budgets?year=2025");
+  fillLines($("dir").value);
+}
+
+function fillLines(dir){
+  const lines = budgets.filter(b=>b.direction===dir);
+  $("line").innerHTML = lines.map(b=>`<option value="${b.linekey}">${b.linekey} >>> ${b.label}</option>`).join("");
+  $("acct").value = lines[0] ? parseAcct(lines[0].linekey) : "";
+}
+
+async function saveTx(){
+  try{
+    $("msg").textContent="Saving...";
+    await api("/api/transactions", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({
+      date:$("date").value,
+      direction:$("dir").value,
+      doctype:$("doc").value,
+      budgetline:$("line").value,
+      account:$("acct").value,
+      amount:Number($("amount").value||0),
+      details:{}
+    })});
+    $("msg").textContent="Saved.";
+    await loadTx();
+  }catch(e){
+    $("msg").textContent="Error: "+e.message;
+    alert("Save error: "+e.message);
+  }
+}
+
+async function loadTx(){
+  const y = Number($("fy").value||0);
+  const d = $("fd").value.trim();
+  const qs = new URLSearchParams();
+  if(y) qs.set("year", y);
+  if(d) qs.set("direction", d);
+  const rows = await api("/api/transactions?"+qs.toString());
+  $("tb").innerHTML = rows.map(r=>`<tr><td>${r.id}</td><td>${r.date}</td><td>${r.direction}</td><td>${r.doctype}</td><td>${fmt(r.amount)}</td><td>${r.budgetline}</td></tr>`).join("");
+}
+
+init().catch(e=>alert("Init error: "+e.message));
+</script>
+</body></html>
