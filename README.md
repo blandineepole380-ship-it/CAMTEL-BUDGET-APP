@@ -1,15 +1,9 @@
-# CAMTEL Budget App (Web)
+# CAMTEL Budget App (Render)
 
-## Quick start (local)
-1. Install Python 3.11
-2. `pip install -r requirements.txt`
-3. `uvicorn main:app --reload`
-4. Open http://127.0.0.1:8000
-Default login: admin / admin123
+## Deploy
+1. Push this repo to GitHub
+2. On Render: New > Web Service > connect the repo
+3. Render will auto-detect `render.yaml` and deploy.
 
-## Deploy on Render (Docker)
-- Push this folder to GitHub
-- Render -> New Web Service -> connect repo
-- Environment variables:
-  - APP_SECRET: a random string
-  - DATABASE_URL: your Render Postgres URL (optional; app falls back to sqlite locally)
+## URL
+After deploy, open the Render URL.

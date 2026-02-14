@@ -2,10 +2,11 @@ FROM python:3.11-slim
 
 WORKDIR /code
 
-COPY requirements.txt .
+COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+# Copy everything (main.py, index.html, budgets_2025.json, assets/)
+COPY . ./
 
 EXPOSE 8000
 
