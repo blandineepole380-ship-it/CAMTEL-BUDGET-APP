@@ -1,0 +1,32 @@
+:root{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif}
+body{margin:0;background:#f4f6f8;color:#111}
+.topbar{background:#1e5aa8;color:#fff;padding:10px 16px;display:flex;justify-content:space-between;align-items:center}
+.brand{font-weight:700}
+.container{max-width:1200px;margin:18px auto;padding:0 14px}
+.panel{background:#fff;border:1px solid #dde3ea;border-radius:10px;padding:16px}
+.row{display:flex;gap:10px;align-items:center;margin:10px 0}
+label{display:block;font-size:12px;color:#3a4652;margin-bottom:6px}
+input,select{width:100%;padding:10px;border:1px solid #cfd8e3;border-radius:8px}
+.btn{padding:9px 12px;border:1px solid #cfd8e3;border-radius:8px;background:#fff;cursor:pointer}
+.btn.primary{background:#2f6feb;border-color:#2f6feb;color:#fff}
+.btn:disabled{opacity:.6;cursor:not-allowed}
+.muted{color:#667586;font-size:13px}
+.msg{margin-left:10px;color:#b42318;font-size:13px}
+.toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.toolbar select,.toolbar input{max-width:240px}
+.grid{display:grid;grid-template-columns: 2fr 1fr;gap:14px;margin-top:12px}
+.tableWrap{overflow:auto;border:1px solid #dde3ea;border-radius:10px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{padding:10px;border-bottom:1px solid #eef2f6;text-align:left;white-space:nowrap}
+tr:hover{background:#f7faff}
+.details{border:1px solid #dde3ea;border-radius:10px;padding:12px}
+.details h3{margin:0 0 8px 0}
+.userbox{display:flex;gap:10px;align-items:center}
+
+dialog{width:min(900px,95vw);border:1px solid #dde3ea;border-radius:12px;padding:0}
+.dialogHead{padding:12px 14px;border-bottom:1px solid #eef2f6;display:flex;justify-content:space-between;align-items:center}
+.dialogActions{display:flex;gap:10px}
+.formGrid{padding:14px;display:grid;grid-template-columns: repeat(4, 1fr);gap:12px}
+.formGrid .span3{grid-column: span 3}
+#fBudget{width:100%}
+#saveMsg{padding:0 14px 14px 14px}
