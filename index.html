@@ -1,139 +1,27 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>CAMTEL Budget App</title>
-  <link rel="stylesheet" href="/static/styles.css" />
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>{{ title }}</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; }
+    header { background: #0b4f9c; color: #fff; padding: 14px 18px; font-weight: 700; }
+    main { padding: 22px; }
+    .card { max-width: 820px; border: 1px solid #ddd; border-radius: 10px; padding: 18px; }
+    .ok { color: #0a7a2f; font-weight: 700; }
+    code { background: #f6f8fa; padding: 2px 6px; border-radius: 6px; }
+  </style>
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">CAMTEL Budget App</div>
-    <div class="userbox" id="userbox" hidden>
-      <span id="username"></span>
-      <button class="btn" id="logoutBtn">Logout</button>
+  <header>CAMTEL Budget App</header>
+  <main>
+    <div class="card">
+      <h2 class="ok">✅ Deployment OK</h2>
+      <p>This ZIP is a <b>known-good Render template</b> (no missing <code>/app</code>, no missing <code>/static</code>).</p>
+      <p>Next step: we will replace this page with your full CAMTEL Budget UI + login + fiche.</p>
+      <p>Health check: <code>/health</code></p>
     </div>
-  </header>
-
-  <main class="container">
-    <section id="loginPanel" class="panel">
-      <h2>Login</h2>
-      <p class="muted">Default: <b>admin</b> / <b>admin123</b> (change later)</p>
-      <div class="row">
-        <label>Username</label>
-        <input id="loginUser" placeholder="username" />
-      </div>
-      <div class="row">
-        <label>Password</label>
-        <input id="loginPass" type="password" placeholder="password" />
-      </div>
-      <div class="row">
-        <button class="btn primary" id="loginBtn">Login</button>
-        <span id="loginMsg" class="msg"></span>
-      </div>
-    </section>
-
-    <section id="appPanel" class="panel" hidden>
-      <div class="toolbar">
-        <select id="yearSel"></select>
-        <input id="search" placeholder="Search code/title" />
-        <select id="docFilter">
-          <option value="">All (Doc)</option>
-          <option value="NC">NC</option>
-          <option value="OM">OM</option>
-          <option value="BC">BC</option>
-        </select>
-        <button class="btn" id="refreshBtn">Refresh</button>
-        <button class="btn primary" id="newBtn">+ New</button>
-      </div>
-
-      <div class="grid">
-        <div class="tableWrap">
-          <table id="txTable">
-            <thead>
-              <tr>
-                <th>Code/Ref</th>
-                <th>Direction</th>
-                <th>Doc</th>
-                <th>Budget line</th>
-                <th>Amount (FCFA)</th>
-                <th>Date</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <div class="details">
-          <h3>Details</h3>
-          <div id="detailsBox" class="muted">Select a transaction, or click + New.</div>
-        </div>
-      </div>
-
-      <dialog id="txDialog">
-        <form method="dialog" id="txForm">
-          <div class="dialogHead">
-            <h3>New transaction</h3>
-            <div class="dialogActions">
-              <button class="btn" value="cancel">Close</button>
-              <button class="btn primary" id="saveBtn" value="default">Save</button>
-            </div>
-          </div>
-
-          <div class="formGrid">
-            <div>
-              <label>Year</label>
-              <select id="fYear"></select>
-            </div>
-            <div>
-              <label>Direction</label>
-              <select id="fDir">
-                <option value="DRH">DRH</option>
-                <option value="DCF">DCF</option>
-                <option value="DOP">DOP</option>
-              </select>
-            </div>
-            <div>
-              <label>Doc</label>
-              <select id="fDoc">
-                <option value="NC">NC</option>
-                <option value="OM">OM</option>
-                <option value="BC">BC</option>
-              </select>
-            </div>
-            <div>
-              <label>Date</label>
-              <input id="fDate" type="date" required />
-            </div>
-
-            <div class="span3">
-              <label>Budget line</label>
-              <input id="fBudgetSearch" placeholder="Type to search budget lines..." />
-              <select id="fBudget" size="6"></select>
-              <div class="muted">Pick a budget line — Direction + CP will auto-fill.</div>
-            </div>
-
-            <div>
-              <label>Code/Ref (auto)</label>
-              <input id="fCode" placeholder="Auto" />
-            </div>
-
-            <div class="span3">
-              <label>Title / Description</label>
-              <input id="fTitle" required />
-            </div>
-
-            <div>
-              <label>Amount (FCFA)</label>
-              <input id="fAmount" type="number" min="0" step="1" required />
-            </div>
-          </div>
-          <div class="msg" id="saveMsg"></div>
-        </form>
-      </dialog>
-    </section>
   </main>
-
-  <script src="/static/app.js"></script>
 </body>
 </html>

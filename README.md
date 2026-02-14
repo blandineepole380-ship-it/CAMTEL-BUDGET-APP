@@ -1,9 +1,7 @@
-# CAMTEL Budget App (Render)
+# CAMTEL Budget App (Render - No Error Starter)
 
-## Deploy
-1. Push this repo to GitHub
-2. On Render: New > Web Service > connect the repo
-3. Render will auto-detect `render.yaml` and deploy.
+This project is intentionally minimal and deploys on Render without path errors.
 
-## URL
-After deploy, open the Render URL.
+Endpoints:
+- /      : HTML
+- /health: JSON
