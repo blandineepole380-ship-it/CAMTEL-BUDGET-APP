@@ -1,506 +1,365 @@
-
 import os
-import json
-from datetime import datetime, date
-
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, Response
-from starlette.middleware.sessions import SessionMiddleware
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import mm
+from fastapi import FastAPI, Request, Response, Form, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from itsdangerous import URLSafeSerializer, BadSignature
 
 APP_NAME = "CAMTEL Budget App"
-DEFAULT_USER = os.getenv("APP_USER", "admin")
-DEFAULT_PASS = os.getenv("APP_PASS", "admin")
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me-please")
+SECRET_KEY = os.environ.get("SECRET_KEY", "change-me")
+ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
+ADMIN_PASS = os.environ.get("ADMIN_PASS", "admin123")
 
-DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("POSTGRES_URL") or os.getenv("RENDER_POSTGRES_URL")
+serializer = URLSafeSerializer(SECRET_KEY, salt="camtel-budget")
 
 app = FastAPI(title=APP_NAME)
-app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, same_site="lax")
 
-def _require_login(request: Request):
-    if not request.session.get("user"):
-        raise HTTPException(status_code=401, detail="Not authenticated")
 
-def _db():
-    if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL is not set. Add it in Render Environment Variables.")
-    return psycopg2.connect(DATABASE_URL, sslmode="require")
-
-def init_db():
-    conn = _db()
+def _get_user(request: Request):
+    token = request.cookies.get("session")
+    if not token:
+        return None
     try:
-        with conn.cursor() as cur:
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS budgets (
-                year INT NOT NULL,
-                direction TEXT NOT NULL,
-                code TEXT NOT NULL,
-                title TEXT NOT NULL,
-                cp BIGINT NOT NULL DEFAULT 0,
-                engaged BIGINT NOT NULL DEFAULT 0,
-                PRIMARY KEY (year, direction, code)
-            );
-            """)
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS transactions (
-                id BIGSERIAL PRIMARY KEY,
-                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-                year INT NOT NULL,
-                direction TEXT NOT NULL,
-                doc TEXT NOT NULL,
-                budget_code TEXT NOT NULL,
-                budget_title TEXT NOT NULL,
-                code_ref TEXT NOT NULL,
-                tdate DATE NOT NULL,
-                title TEXT NOT NULL,
-                amount BIGINT NOT NULL DEFAULT 0
-            );
-            """)
-        conn.commit()
-    finally:
-        conn.close()
+        data = serializer.loads(token)
+        return data.get("u")
+    except BadSignature:
+        return None
 
-def seed_budgets_from_json():
-    path = os.path.join(os.path.dirname(__file__), "budgets_2025.json")
-    if not os.path.exists(path):
-        return
-    data = json.load(open(path, "r", encoding="utf-8"))
-    conn = _db()
-    try:
-        with conn.cursor() as cur:
-            for row in data:
-                year = int(row.get("year", 2025))
-                direction = row.get("direction") or "DRH"
-                code = str(row.get("code") or "").strip()
-                title = str(row.get("title") or "").strip()
-                cp = int(row.get("cp") or 0)
-                engaged = int(row.get("engaged") or 0)
-                if not code or not title:
-                    continue
-                cur.execute(
-                    """
-                    INSERT INTO budgets(year, direction, code, title, cp, engaged)
-                    VALUES (%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (year, direction, code)
-                    DO UPDATE SET title=EXCLUDED.title, cp=EXCLUDED.cp, engaged=EXCLUDED.engaged;
-                    """,
-                    (year, direction, code, title, cp, engaged),
-                )
-        conn.commit()
-    finally:
-        conn.close()
 
-@app.on_event("startup")
-def _startup():
-    init_db()
-    seed_budgets_from_json()
+def require_login(request: Request):
+    user = _get_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    return user
 
-HTML = r"""<!doctype html>
-<html><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>CAMTEL Budget App</title>
-<style>
-body{font-family:system-ui,Segoe UI,Arial;margin:0;background:#f5f6f8}
-header{background:#1f5fbf;color:#fff;padding:12px 16px;display:flex;justify-content:space-between;align-items:center}
-.wrap{max-width:1100px;margin:18px auto;padding:0 12px}
-.card{background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:12px}
-.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-input,select,button{padding:9px 10px;border:1px solid #d1d5db;border-radius:8px;font-size:14px}
-button{background:#2563eb;color:white;border:none;cursor:pointer}
-button.secondary{background:#6b7280}
-button.danger{background:#dc2626}
-table{width:100%;border-collapse:collapse;margin-top:10px}
-th,td{border-bottom:1px solid #eef2f7;padding:8px;text-align:left;font-size:14px}
-tr:hover{background:#f9fafb}
-.muted{color:#6b7280;font-size:13px}
-.right{margin-left:auto}
-.hidden{display:none}
-.modal{position:fixed;inset:0;background:rgba(0,0,0,.4);display:none;align-items:center;justify-content:center;padding:14px}
-.modal .box{width:min(920px,100%);background:#fff;border-radius:12px;padding:14px}
-.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-@media (max-width:800px){.grid2{grid-template-columns:1fr}}
-</style></head>
+
+INDEX_HTML = """<!doctype html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8'/>
+  <meta name='viewport' content='width=device-width,initial-scale=1'/>
+  <title>CAMTEL Budget App</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#f6f7fb;}
+    header{background:#1f4d8f;color:#fff;padding:14px 18px;font-weight:700;}
+    .wrap{max-width:1100px;margin:18px auto;padding:0 14px;}
+    .card{background:#fff;border:1px solid #e6e8f0;border-radius:10px;box-shadow:0 1px 2px rgba(0,0,0,.04);}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;padding:12px;}
+    input,select,button{padding:10px;border-radius:8px;border:1px solid #d7dbe7;}
+    button{background:#2563eb;color:#fff;border:none;cursor:pointer;}
+    button.secondary{background:#64748b;}
+    table{width:100%;border-collapse:collapse;}
+    th,td{padding:10px;border-top:1px solid #eef0f6;font-size:14px;text-align:left;}
+    .right{text-align:right;}
+    .muted{color:#6b7280;font-size:13px;}
+    .grid{display:grid;grid-template-columns:1fr 320px;gap:12px;}
+    @media(max-width:900px){.grid{grid-template-columns:1fr;}}
+    .toast{position:fixed;right:16px;bottom:16px;background:#111827;color:#fff;padding:10px 12px;border-radius:10px;display:none;}
+  </style>
+</head>
 <body>
-<header><div><b>CAMTEL</b> Budget App</div><div id="userbar" class="muted"></div></header>
-
-<div class="wrap">
-  <div class="card" id="loginCard">
-    <h3>Login</h3>
-    <div class="row">
-      <input id="u" placeholder="Username" value="admin"/>
-      <input id="p" placeholder="Password" type="password" value="admin"/>
-      <button onclick="login()">Login</button>
-      <span id="loginMsg" class="muted"></span>
-    </div>
-    <p class="muted">Default is admin/admin (change on Render with APP_USER + APP_PASS).</p>
-  </div>
-
-  <div class="card hidden" id="appCard">
-    <div class="row">
-      <select id="yearSel"></select>
-      <select id="docSel"><option value="NC">NC</option><option value="OM">OM</option><option value="BC">BC</option></select>
-      <input id="search" placeholder="Search code/title..." style="min-width:240px"/>
-      <button class="secondary" onclick="refresh()">Refresh</button>
-      <button onclick="openNew()">+ New</button>
-      <button onclick="printA4()" class="secondary" id="printBtn">Print A4 (0)</button>
-      <button onclick="delSelected()" class="danger">Delete</button>
-      <div class="right"><button class="secondary" onclick="logout()">Logout</button></div>
-    </div>
-    <p class="muted">Tip: select up to 2 transactions, then click Print A4 (2).</p>
-
-    <table id="tbl">
-      <thead><tr><th></th><th>Code/Ref</th><th>Direction</th><th>Doc</th><th>Budget line</th><th>Amount (FCFA)</th><th>Date</th></tr></thead>
-      <tbody></tbody>
-    </table>
-  </div>
-</div>
-
-<div class="modal" id="modal">
-  <div class="box">
-    <div class="row">
-      <h3 style="margin:0">New transaction</h3>
-      <div class="right"></div>
-      <button class="secondary" onclick="closeModal()">Close</button>
-      <button onclick="saveTx()">Save</button>
-    </div>
-    <div class="grid2">
-      <div><label class="muted">Year</label><br/><select id="mYear"></select></div>
-      <div><label class="muted">Direction</label><br/>
-        <select id="mDir"><option value="DRH">DRH</option><option value="DCF">DCF</option><option value="DG">DG</option><option value="DOP">DOP</option><option value="DCP">DCP</option></select></div>
-      <div><label class="muted">Doc</label><br/><select id="mDoc"><option value="NC">NC</option><option value="OM">OM</option><option value="BC">BC</option></select></div>
-      <div><label class="muted">Code/Ref</label><br/><input id="mCode" placeholder="Auto"/></div>
-      <div style="grid-column:1/-1">
-        <label class="muted">Budget line</label><br/>
-        <input id="budgetSearch" placeholder="Type to search budget lines..." oninput="budgetSuggest()"/>
-        <select id="budgetPick" style="width:100%;margin-top:6px"></select>
+<header>CAMTEL Budget App</header>
+<div class='wrap'>
+  <div class='grid'>
+    <div class='card'>
+      <div class='row'>
+        <select id='year'></select>
+        <input id='search' placeholder='Search code/title' style='flex:1;min-width:220px'/>
+        <button onclick='openNew()'>+ New</button>
+        <button class='secondary' onclick='loadTx()'>Refresh</button>
       </div>
-      <div><label class="muted">Date</label><br/><input id="mDate" type="date"/></div>
-      <div><label class="muted">Amount (FCFA)</label><br/><input id="mAmount" type="number" min="0" step="1"/></div>
-      <div style="grid-column:1/-1"><label class="muted">Title / Description</label><br/><input id="mTitle" placeholder="Description"/></div>
+      <div style='overflow:auto'>
+        <table>
+          <thead>
+            <tr><th>Code/Ref</th><th>Direction</th><th>Doc</th><th>Budget line</th><th class='right'>Amount</th><th>Date</th></tr>
+          </thead>
+          <tbody id='rows'></tbody>
+        </table>
+      </div>
+      <div class='row muted'>Tip: create a transaction, then print the fiche from Details.</div>
     </div>
-    <div id="saveMsg" class="muted" style="margin-top:8px"></div>
+
+    <div class='card' style='padding:12px'>
+      <div style='display:flex;justify-content:space-between;align-items:center'>
+        <strong>Details</strong>
+        <button class='secondary' onclick='logout()'>Logout</button>
+      </div>
+      <div id='detail' class='muted' style='margin-top:10px'>Select a transaction, or click + New.</div>
+    </div>
   </div>
 </div>
+
+<div id='toast' class='toast'></div>
 
 <script>
-let budgetsCache=[], txs=[], selectedIds=[], selectedOrder=[];
-function fmt(n){ try{return new Intl.NumberFormat().format(n||0);}catch(e){return n||0;} }
-async function api(path, opts={}){
-  const res = await fetch(path, {credentials:'include', ...opts});
-  if(!res.ok){ const t=await res.text(); throw new Error(t||res.statusText); }
-  const ct=res.headers.get('content-type')||'';
-  if(ct.includes('application/json')) return res.json();
-  return res.text();
+const toast=(m)=>{const t=document.getElementById('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2500)};
+
+function initYears(){
+  const y=document.getElementById('year');
+  const now=new Date().getFullYear();
+  for(let i=now-1;i<=now+2;i++){const o=document.createElement('option');o.value=i;o.textContent=i;y.appendChild(o)}
+  y.value=now;
 }
-async function login(){
-  const u=document.getElementById('u').value.trim();
-  const p=document.getElementById('p').value;
-  document.getElementById('loginMsg').textContent='Logging in...';
-  try{
-    await api('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:u,password:p})});
-    await boot();
-  }catch(e){ document.getElementById('loginMsg').textContent='Login failed.'; }
+
+async function api(path, opts){
+  const r=await fetch(path, {credentials:'include', ...(opts||{})});
+  if(r.status===401){ window.location='/login'; return null; }
+  return r;
 }
-async function logout(){ await api('/api/logout',{method:'POST'}); location.reload(); }
-async function boot(){
-  try{
-    const me=await api('/api/me');
-    document.getElementById('loginCard').classList.add('hidden');
-    document.getElementById('appCard').classList.remove('hidden');
-    document.getElementById('userbar').textContent='User: '+me.username;
-    const years=[2025,2026,2027], ys=document.getElementById('yearSel'); ys.innerHTML='';
-    years.forEach(y=>{const o=document.createElement('option');o.value=y;o.textContent=y;ys.appendChild(o);});
-    ys.value=new Date().getFullYear(); ys.onchange=refresh;
-    document.getElementById('search').oninput=render;
-    await refresh();
-    document.getElementById('loginMsg').textContent='';
-  }catch(e){}
-}
-async function loadBudgets(){
-  const y=document.getElementById('yearSel').value;
-  budgetsCache=await api('/api/budgets?year='+encodeURIComponent(y));
-}
-function budgetSuggest(){
-  const q=document.getElementById('budgetSearch').value.toLowerCase().trim();
-  const pick=document.getElementById('budgetPick'); pick.innerHTML='';
-  const items=budgetsCache.filter(b=>(b.code+' '+b.title+' '+b.direction).toLowerCase().includes(q)).slice(0,50);
-  items.forEach(b=>{const o=document.createElement('option');o.value=b.code;o.textContent=`${b.direction} — ${b.code} — ${b.title}`;o.dataset.dir=b.direction;o.dataset.title=b.title;pick.appendChild(o);});
-  if(items.length===0){const o=document.createElement('option');o.value='';o.textContent='No match';pick.appendChild(o);}
-}
-async function refresh(){
-  await loadBudgets();
-  selectedIds=[]; selectedOrder=[];
-  const y=document.getElementById('yearSel').value;
-  txs=await api('/api/transactions?year='+encodeURIComponent(y));
-  render();
-}
-function toggleSelect(id, checked){
-  if(checked){
-    if(selectedIds.length>=2){document.getElementById('cb_'+id).checked=false; return;}
-    selectedIds.push(id); selectedOrder.push(id);
-  }else{
-    selectedIds=selectedIds.filter(x=>x!==id);
-    selectedOrder=selectedOrder.filter(x=>x!==id);
+
+async function loadTx(){
+  const year=document.getElementById('year').value;
+  const q=document.getElementById('search').value.trim();
+  const r=await api(`/api/tx?year=${encodeURIComponent(year)}&q=${encodeURIComponent(q)}`);
+  if(!r) return;
+  const data=await r.json();
+  const body=document.getElementById('rows');
+  body.innerHTML='';
+  for(const t of data){
+    const tr=document.createElement('tr');
+    tr.innerHTML=`<td><a href='#' onclick='showDetail(${t.id});return false;'>${t.code}</a></td><td>${t.direction}</td><td>${t.doc}</td><td>${t.budget_line}</td><td class='right'>${t.amount.toLocaleString()}</td><td>${t.date}</td>`;
+    body.appendChild(tr);
   }
-  document.getElementById('printBtn').textContent=`Print A4 (${selectedIds.length})`;
 }
-function render(){
-  const q=document.getElementById('search').value.toLowerCase().trim();
-  const tbody=document.querySelector('#tbl tbody'); tbody.innerHTML='';
-  txs.filter(t=> (t.code_ref+' '+t.direction+' '+t.doc+' '+t.budget_code+' '+t.budget_title+' '+t.title).toLowerCase().includes(q))
-    .forEach(t=>{
-      const tr=document.createElement('tr');
-      tr.innerHTML=`<td><input type="checkbox" id="cb_${t.id}"></td><td>${t.code_ref}</td><td>${t.direction}</td><td>${t.doc}</td><td>${t.budget_code} — ${t.budget_title}</td><td>${fmt(t.amount)}</td><td>${t.tdate}</td>`;
-      tr.querySelector('input').addEventListener('change',(e)=>toggleSelect(t.id,e.target.checked));
-      tbody.appendChild(tr);
-    });
-  document.getElementById('printBtn').textContent=`Print A4 (${selectedIds.length})`;
-}
+
 function openNew(){
-  document.getElementById('modal').style.display='flex';
-  const y=document.getElementById('yearSel').value;
-  const my=document.getElementById('mYear'); my.innerHTML='';
-  [2025,2026,2027].forEach(v=>{const o=document.createElement('option');o.value=v;o.textContent=v;my.appendChild(o);});
-  my.value=y;
-  document.getElementById('mDoc').value=document.getElementById('docSel').value;
-  document.getElementById('mDate').value=new Date().toISOString().slice(0,10);
-  document.getElementById('mAmount').value='';
-  document.getElementById('mTitle').value='';
-  document.getElementById('mCode').value='';
-  document.getElementById('budgetSearch').value='';
-  budgetSuggest();
-  document.getElementById('saveMsg').textContent='';
+  const html=`
+    <div>
+      <h3 style='margin:8px 0 10px'>New transaction</h3>
+      <div class='muted'>Minimal working online version (save + fiche). We can add full budget lines next.</div>
+      <div style='display:grid;gap:8px;margin-top:10px'>
+        <input id='f_code' placeholder='Code/Ref (auto if empty)'/>
+        <input id='f_direction' placeholder='Direction (e.g., DRH)' value='DRH'/>
+        <input id='f_doc' placeholder='Doc (e.g., NC)' value='NC'/>
+        <input id='f_budget' placeholder='Budget line' value='DRH - 60530000 - CARBURANT ET LUBRIFIANT'/>
+        <input id='f_title' placeholder='Title/Description' value='CARBURANT ET LUBRIFIANT'/>
+        <input id='f_date' type='date'/>
+        <input id='f_amount' type='number' placeholder='Amount (FCFA)' value='70000'/>
+        <div style='display:flex;gap:8px'>
+          <button onclick='saveNew()'>Save</button>
+          <button class='secondary' onclick='clearDetail()'>Close</button>
+        </div>
+      </div>
+    </div>
+  `;
+  document.getElementById('detail').innerHTML=html;
+  const d=new Date();
+  document.getElementById('f_date').value = d.toISOString().slice(0,10);
 }
-function closeModal(){ document.getElementById('modal').style.display='none'; }
-async function saveTx(){
-  const pick=document.getElementById('budgetPick');
-  const opt=pick.options[pick.selectedIndex];
-  if(!opt || !opt.value){document.getElementById('saveMsg').textContent='Choose a budget line.'; return;}
+
+function clearDetail(){
+  document.getElementById('detail').innerHTML="Select a transaction, or click + New.";
+}
+
+async function saveNew(){
   const payload={
-    year:Number(document.getElementById('mYear').value),
-    direction:opt.dataset.dir || document.getElementById('mDir').value,
-    doc:document.getElementById('mDoc').value,
-    budget_code:opt.value,
-    budget_title:opt.dataset.title,
-    code_ref:document.getElementById('mCode').value.trim(),
-    tdate:document.getElementById('mDate').value,
-    title:document.getElementById('mTitle').value.trim(),
-    amount:Number(document.getElementById('mAmount').value||0)
+    code: document.getElementById('f_code').value,
+    direction: document.getElementById('f_direction').value,
+    doc: document.getElementById('f_doc').value,
+    budget_line: document.getElementById('f_budget').value,
+    title: document.getElementById('f_title').value,
+    date: document.getElementById('f_date').value,
+    amount: Number(document.getElementById('f_amount').value||0),
+    year: Number(document.getElementById('year').value)
   };
-  document.getElementById('saveMsg').textContent='Saving...';
-  try{
-    await api('/api/transactions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    closeModal(); await refresh();
-  }catch(e){ document.getElementById('saveMsg').textContent='Save failed: '+e.message; }
+  const r=await api('/api/tx', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+  if(!r) return;
+  const data=await r.json();
+  toast('Saved');
+  await loadTx();
+  await showDetail(data.id);
 }
-async function delSelected(){
-  if(selectedIds.length===0) return;
-  if(!confirm('Delete selected?')) return;
-  await api('/api/transactions',{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:selectedIds})});
-  selectedIds=[]; selectedOrder=[]; await refresh();
+
+async function showDetail(id){
+  const r=await api('/api/tx/'+id);
+  if(!r) return;
+  const t=await r.json();
+  const html=`
+    <div>
+      <div style='display:flex;justify-content:space-between;align-items:center'>
+        <strong>Transaction</strong>
+        <button onclick='openFiche(${t.id})'>Print fiche</button>
+      </div>
+      <div class='muted' style='margin-top:8px'>${t.title}</div>
+      <div style='margin-top:10px'>
+        <div><b>Code:</b> ${t.code}</div>
+        <div><b>Direction:</b> ${t.direction}</div>
+        <div><b>Doc:</b> ${t.doc}</div>
+        <div><b>Budget line:</b> ${t.budget_line}</div>
+        <div><b>Amount:</b> ${t.amount.toLocaleString()} FCFA</div>
+        <div><b>Date:</b> ${t.date}</div>
+      </div>
+    </div>
+  `;
+  document.getElementById('detail').innerHTML=html;
 }
-function printA4(){
-  if(selectedIds.length===0) return;
-  const ids=selectedOrder.filter(id=>selectedIds.includes(id));
-  window.open('/api/fiche.pdf?ids='+encodeURIComponent(ids.join(',')),'_blank');
+
+function openFiche(id){
+  window.open('/fiche/'+id, '_blank');
 }
-boot();
-</script></body></html>
-"""
+
+async function logout(){
+  await fetch('/api/logout', {method:'POST', credentials:'include'});
+  window.location='/login';
+}
+
+initYears();
+loadTx();
+document.getElementById('year').addEventListener('change', loadTx);
+document.getElementById('search').addEventListener('input', ()=>{clearTimeout(window.__t);window.__t=setTimeout(loadTx,250)});
+</script>
+</body>
+</html>"""
+
+
+LOGIN_HTML = """<!doctype html>
+<html lang='en'><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width,initial-scale=1'/>
+<title>Login - CAMTEL Budget App</title>
+<style>
+body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;background:#f6f7fb;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center;}
+.card{width:360px;background:#fff;border:1px solid #e6e8f0;border-radius:12px;padding:16px;box-shadow:0 1px 2px rgba(0,0,0,.04)}
+input,button{width:100%;padding:10px;border-radius:8px;border:1px solid #d7dbe7;margin-top:10px;}
+button{background:#2563eb;color:#fff;border:none;cursor:pointer;}
+.small{color:#6b7280;font-size:13px;margin-top:10px;}
+</style></head>
+<body>
+<div class='card'>
+  <h2 style='margin:0 0 6px'>CAMTEL Budget App</h2>
+  <div class='small'>Login to start working.</div>
+  <form method='post' action='/api/login'>
+    <input name='username' placeholder='Username' required />
+    <input name='password' placeholder='Password' type='password' required />
+    <button type='submit'>Login</button>
+  </form>
+  <div class='small'>Default: admin / admin123 (change with env vars ADMIN_USER / ADMIN_PASS)</div>
+</div>
+</body></html>"""
+
+
+# in-memory storage (simple + reliable on free tier; can switch to Postgres later)
+TX = []
+NEXT_ID = 1
+
+
+def _make_code(direction: str, year: int, n: int):
+    return f"JD{direction}-{year}{n:04d}"
+
 
 @app.get("/", response_class=HTMLResponse)
-def index(_: Request):
-    return HTMLResponse(HTML)
+def home(request: Request):
+    user = _get_user(request)
+    if not user:
+        return RedirectResponse("/login")
+    return HTMLResponse(INDEX_HTML)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    return HTMLResponse(LOGIN_HTML)
+
 
 @app.post("/api/login")
-async def api_login(request: Request):
-    data = await request.json()
-    u = (data.get("username") or "").strip()
-    p = data.get("password") or ""
-    if u == DEFAULT_USER and p == DEFAULT_PASS:
-        request.session["user"] = {"username": u}
-        return {"ok": True}
-    raise HTTPException(status_code=401, detail="Bad credentials")
+def login(username: str = Form(...), password: str = Form(...)):
+    if username != ADMIN_USER or password != ADMIN_PASS:
+        return HTMLResponse(LOGIN_HTML.replace("Login to start working.", "Invalid credentials."), status_code=401)
+    token = serializer.dumps({"u": username})
+    resp = RedirectResponse("/", status_code=302)
+    resp.set_cookie("session", token, httponly=True, samesite="lax")
+    return resp
+
 
 @app.post("/api/logout")
-def api_logout(request: Request):
-    request.session.clear()
-    return {"ok": True}
+def logout(response: Response):
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("session")
+    return resp
 
-@app.get("/api/me")
-def api_me(request: Request):
-    _require_login(request)
-    return request.session["user"]
 
-@app.get("/api/budgets")
-def api_budgets(request: Request, year: int):
-    _require_login(request)
-    conn = _db()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                "SELECT year,direction,code,title,cp,engaged FROM budgets WHERE year=%s ORDER BY direction, code",
-                (year,),
-            )
-            return cur.fetchall()
-    finally:
-        conn.close()
+@app.get("/api/tx")
+def list_tx(request: Request, year: int, q: str = ""):
+    require_login(request)
+    ql = q.lower().strip()
+    items = [t for t in TX if t["year"] == year]
+    if ql:
+        items = [t for t in items if ql in t["code"].lower() or ql in t["title"].lower()]
+    return items[::-1]
 
-def _auto_code(direction: str, tdate: date):
-    conn = _db()
-    try:
-        with conn.cursor() as cur:
-            prefix = f"JD{direction}"
-            cur.execute("SELECT COUNT(*) FROM transactions WHERE direction=%s AND tdate=%s", (direction, tdate))
-            n = cur.fetchone()[0] + 1
-        return f"{prefix}-{tdate.strftime('%Y%m%d')}-{n:03d}"
-    finally:
-        conn.close()
 
-@app.get("/api/transactions")
-def api_transactions(request: Request, year: int):
-    _require_login(request)
-    conn = _db()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT id, year, direction, doc, budget_code, budget_title, code_ref,
-                       to_char(tdate,'YYYY-MM-DD') as tdate, title, amount
-                FROM transactions WHERE year=%s ORDER BY id DESC
-                """,
-                (year,),
-            )
-            return cur.fetchall()
-    finally:
-        conn.close()
+@app.post("/api/tx")
+def create_tx(request: Request, payload: dict):
+    require_login(request)
+    global NEXT_ID
+    direction = (payload.get("direction") or "").strip() or "DRH"
+    doc = (payload.get("doc") or "").strip() or "NC"
+    budget_line = (payload.get("budget_line") or "").strip() or ""
+    title = (payload.get("title") or "").strip() or ""
+    date = (payload.get("date") or "").strip() or ""
+    amount = int(payload.get("amount") or 0)
+    year = int(payload.get("year") or 0)
 
-@app.post("/api/transactions")
-async def api_create_tx(request: Request):
-    _require_login(request)
-    data = await request.json()
-    year = int(data["year"])
-    direction = data["direction"]
-    doc = data["doc"]
-    budget_code = data["budget_code"]
-    budget_title = data["budget_title"]
-    tdate = datetime.strptime(data["tdate"], "%Y-%m-%d").date()
-    title = (data.get("title") or "").strip() or budget_title
-    amount = int(data.get("amount") or 0)
-    code_ref = (data.get("code_ref") or "").strip() or _auto_code(direction, tdate)
+    if not year:
+        raise HTTPException(status_code=400, detail="Year required")
+    if not date:
+        raise HTTPException(status_code=400, detail="Date required")
 
-    conn = _db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO transactions(year,direction,doc,budget_code,budget_title,code_ref,tdate,title,amount)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                RETURNING id
-                """,
-                (year, direction, doc, budget_code, budget_title, code_ref, tdate, title, amount),
-            )
-            tid = cur.fetchone()[0]
-        conn.commit()
-        return {"id": tid}
-    finally:
-        conn.close()
+    code = (payload.get("code") or "").strip()
+    if not code:
+        code = _make_code(direction, year, NEXT_ID)
 
-@app.delete("/api/transactions")
-async def api_delete_tx(request: Request):
-    _require_login(request)
-    data = await request.json()
-    ids = data.get("ids") or []
-    if not ids:
-        return {"ok": True}
-    conn = _db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM transactions WHERE id = ANY(%s)", (ids,))
-        conn.commit()
-        return {"ok": True}
-    finally:
-        conn.close()
+    tx = {
+        "id": NEXT_ID,
+        "code": code,
+        "direction": direction,
+        "doc": doc,
+        "budget_line": budget_line,
+        "title": title,
+        "date": date,
+        "amount": amount,
+        "year": year,
+    }
+    TX.append(tx)
+    NEXT_ID += 1
+    return tx
 
-def draw_fiche(c: canvas.Canvas, x0, y0, w, h, tx: dict):
-    pad = 8 * mm
-    c.rect(x0, y0, w, h)
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(x0 + pad, y0 + h - pad - 4, "FICHE DE TRANSACTION")
-    c.setFont("Helvetica", 10)
-    lines = [
-        ("Code/Ref:", tx["code_ref"]),
-        ("Direction:", tx["direction"]),
-        ("Doc:", tx["doc"]),
-        ("Budget line:", f'{tx["budget_code"]} — {tx["budget_title"]}'),
-        ("Date:", tx["tdate"]),
-        ("Title:", tx["title"]),
-        ("Amount (FCFA):", f'{tx["amount"]:,}'.replace(",", " ")),
-    ]
-    yy = y0 + h - pad - 22
-    for k, v in lines:
-        c.drawString(x0 + pad, yy, k)
-        c.drawString(x0 + pad + 35 * mm, yy, str(v))
-        yy -= 10 * mm
 
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(x0 + pad, y0 + 28 * mm, "Signatures")
-    c.setFont("Helvetica", 9)
-    c.drawString(x0 + pad, y0 + 22 * mm, "Initiated by:")
-    c.line(x0 + pad + 25 * mm, y0 + 22 * mm, x0 + w / 2 - 10 * mm, y0 + 22 * mm)
-    c.drawString(x0 + w / 2 + 5 * mm, y0 + 22 * mm, "Checked/Approved:")
-    c.line(x0 + w / 2 + 40 * mm, y0 + 22 * mm, x0 + w - pad, y0 + 22 * mm)
-    c.drawString(x0 + pad, y0 + 12 * mm, "Finance:")
-    c.line(x0 + pad + 18 * mm, y0 + 12 * mm, x0 + w / 2 - 10 * mm, y0 + 12 * mm)
-    c.drawString(x0 + w / 2 + 5 * mm, y0 + 12 * mm, "Receiver:")
-    c.line(x0 + w / 2 + 25 * mm, y0 + 12 * mm, x0 + w - pad, y0 + 12 * mm)
+@app.get("/api/tx/{tx_id}")
+def get_tx(request: Request, tx_id: int):
+    require_login(request)
+    for t in TX:
+        if t["id"] == tx_id:
+            return t
+    raise HTTPException(status_code=404, detail="Not found")
 
-@app.get("/api/fiche.pdf")
-def api_fiche_pdf(request: Request, ids: str):
-    _require_login(request)
-    id_list = [int(x) for x in ids.split(",") if x.strip().isdigit()]
-    if not id_list:
-        raise HTTPException(status_code=400, detail="No ids")
 
-    conn = _db()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(
-                """
-                SELECT id, direction, doc, budget_code, budget_title, code_ref,
-                       to_char(tdate,'YYYY-MM-DD') as tdate, title, amount
-                FROM transactions WHERE id = ANY(%s)
-                """,
-                (id_list,),
-            )
-            rows = {int(r["id"]): r for r in cur.fetchall()}
-    finally:
-        conn.close()
-
-    ordered = [rows[i] for i in id_list if i in rows]
-    if not ordered:
+@app.get("/fiche/{tx_id}", response_class=HTMLResponse)
+def fiche(request: Request, tx_id: int):
+    user = require_login(request)
+    t = None
+    for x in TX:
+        if x["id"] == tx_id:
+            t = x
+            break
+    if not t:
         raise HTTPException(status_code=404, detail="Not found")
 
-    from io import BytesIO
-    buf = BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    W, H = A4
-    half = H / 2
-    fiche_h = half - 10 * mm
-    fiche_w = W - 20 * mm
-    x0 = 10 * mm
-
-    i = 0
-    while i < len(ordered):
-        draw_fiche(c, x0, half + 5 * mm, fiche_w, fiche_h, ordered[i]); i += 1
-        if i < len(ordered):
-            draw_fiche(c, x0, 5 * mm, fiche_w, fiche_h, ordered[i]); i += 1
-        c.showPage()
-    c.save()
-    pdf = buf.getvalue()
-    return Response(content=pdf, media_type="application/pdf")
+    html = f"""<!doctype html>
+<html><head><meta charset='utf-8'/><title>Fiche {t['code']}</title>
+<style>
+body{{font-family:Arial,sans-serif;margin:18px;}}
+.box{{border:1px solid #333;padding:14px;}}
+.row{{display:flex;justify-content:space-between;}}
+small{{color:#555;}}
+@media print{{button{{display:none;}}}}
+</style></head>
+<body>
+<button onclick='window.print()'>Print</button>
+<h2>Fiche d'engagement</h2>
+<div class='box'>
+  <div class='row'><div><b>Code/Ref:</b> {t['code']}</div><div><b>Date:</b> {t['date']}</div></div>
+  <p><b>Direction:</b> {t['direction']} &nbsp; | &nbsp; <b>Doc:</b> {t['doc']}</p>
+  <p><b>Budget line:</b> {t['budget_line']}</p>
+  <p><b>Title/Description:</b> {t['title']}</p>
+  <p><b>Amount:</b> {t['amount']:,} FCFA</p>
+  <hr/>
+  <small>Generated by {APP_NAME} (user: {user})</small>
+</div>
+</body></html>"""
+    return HTMLResponse(html)
