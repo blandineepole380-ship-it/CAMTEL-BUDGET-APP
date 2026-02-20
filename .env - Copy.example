@@ -1,0 +1,9 @@
+# Render Postgres (recommended)
+DATABASE_URL=postgresql+psycopg2://USER:PASSWORD@HOST:PORT/DBNAME
+
+# Secret used for JWT signing (change this)
+SECRET_KEY=change-me-to-a-long-random-string
+
+# One-time admin seed (created at startup if not exists)
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=admin123
