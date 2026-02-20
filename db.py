@@ -1,8 +1,8 @@
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
-from app.settings import settings
-from app.models import Base
+from settings import settings
+from models import Base
 
 
 def _make_engine():

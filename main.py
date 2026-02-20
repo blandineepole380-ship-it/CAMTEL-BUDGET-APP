@@ -14,10 +14,10 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
-from app.db import SessionLocal, init_db
-from app import models
-from app.security import verify_password, hash_password, create_access_token, decode_token
-from app.pdf import build_fiche_pdf
+from db import SessionLocal, init_db
+import models
+from security import verify_password, hash_password, create_access_token, decode_token
+from pdf import build_fiche_pdf
 
 APP_NAME = "CAMTEL Budget App"
 
