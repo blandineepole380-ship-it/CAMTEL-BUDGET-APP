@@ -1,425 +1,340 @@
-from __future__ import annotations
-
 import os
-from datetime import datetime, timedelta
-from typing import Optional, List
+from datetime import datetime
+from typing import Optional
 
-from fastapi import FastAPI, Request, Depends, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi import FastAPI, Request, Depends, HTTPException, status
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.middleware.cors import CORSMiddleware
 
-from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float
+from sqlalchemy.orm import sessionmaker, declarative_base, Session
+from sqlalchemy.exc import IntegrityError
 
-from app.db import SessionLocal, init_db
-from app import models
-from app.security import verify_password, hash_password, create_access_token, decode_token
-from app.pdf import build_fiche_pdf
+from passlib.context import CryptContext
+from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 
-APP_NAME = "CAMTEL Budget App"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./camtel_budget.db")
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
 
-app = FastAPI(title=APP_NAME)
+pwd_ctx = CryptContext(schemes=["bcrypt"], deprecated="auto")
+signer = URLSafeTimedSerializer(SECRET_KEY, salt="camtel-budget-session")
 
-BASE_DIR = os.path.dirname(__file__)
-STATIC_DIR = os.path.join(BASE_DIR, "static")
-TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+connect_args = {}
+if DATABASE_URL.startswith("sqlite"):
+    connect_args = {"check_same_thread": False}
 
-# Always mount static, but ONLY if directory exists (prevent the error you had)
-if os.path.isdir(STATIC_DIR):
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+engine = create_engine(DATABASE_URL, pool_pre_ping=True, connect_args=connect_args)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+Base = declarative_base()
 
-templates = Jinja2Templates(directory=TEMPLATES_DIR)
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    username = Column(String(100), unique=True, index=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    role = Column(String(20), default="user")      # admin/user
+    department = Column(String(10), default="BUM") # BUM/DIG/DRH
 
+class Transaction(Base):
+    __tablename__ = "transactions"
+    id = Column(Integer, primary_key=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    created_by = Column(String(100), nullable=False)
 
-def get_db():
+    year = Column(Integer, default=lambda: datetime.utcnow().year, index=True)
+    department = Column(String(10), nullable=False)
+    doc_type = Column(String(10), nullable=False)   # OM/BC/OTHER
+
+    code_ref = Column(String(50), nullable=True)
+    direction = Column(String(50), nullable=True)
+    doc = Column(String(100), nullable=True)
+
+    budget_line = Column(String(200), nullable=False)
+    amount_fcfa = Column(Float, default=0.0)
+    status = Column(String(30), default="Draft")
+    tx_date = Column(String(20), default=lambda: datetime.utcnow().strftime("%Y-%m-%d"))
+
+    # OM
+    date_aller = Column(String(20), nullable=True)
+    date_retour = Column(String(20), nullable=True)
+    days = Column(Integer, nullable=True)
+    amount_per_day = Column(Float, nullable=True)
+    om_total = Column(Float, nullable=True)
+
+    # BC
+    ht = Column(Float, nullable=True)
+    tva = Column(Float, nullable=True)
+    ir_rate = Column(Float, nullable=True)
+    total_tax = Column(Float, nullable=True)
+    net_a_payer = Column(Float, nullable=True)
+    ttc = Column(Float, nullable=True)
+
+Base.metadata.create_all(engine)
+
+def db_dep() -> Session:
     db = SessionLocal()
     try:
         yield db
     finally:
         db.close()
 
+def hash_pw(p: str) -> str:
+    return pwd_ctx.hash(p)
+
+def verify_pw(p: str, h: str) -> bool:
+    return pwd_ctx.verify(p, h)
+
+def ensure_admin(db: Session):
+    admin = db.query(User).filter(User.username == ADMIN_USER).first()
+    if not admin:
+        admin = User(username=ADMIN_USER, password_hash=hash_pw(ADMIN_PASS), role="admin", department="BUM")
+        db.add(admin)
+        db.commit()
+
+def get_current_user(request: Request, db: Session = Depends(db_dep)) -> User:
+    token = request.cookies.get("session")
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    try:
+        payload = signer.loads(token, max_age=60*60*24*7)
+    except (SignatureExpired, BadSignature):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    username = payload.get("u")
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    return user
+
+def require_admin(user: User = Depends(get_current_user)) -> User:
+    if user.role != "admin":
+        raise HTTPException(403, "Admin only")
+    return user
+
+def apply_om_calc(t: dict) -> dict:
+    try:
+        da, dr = t.get("date_aller"), t.get("date_retour")
+        apd = float(t.get("amount_per_day") or 0)
+        if da and dr:
+            d1 = datetime.strptime(da, "%Y-%m-%d").date()
+            d2 = datetime.strptime(dr, "%Y-%m-%d").date()
+            days = (d2 - d1).days + 1
+            if days < 0: days = 0
+            t["days"] = days
+            t["om_total"] = days * apd
+    except Exception:
+        pass
+    return t
+
+def apply_bc_tax(t: dict) -> dict:
+    try:
+        ht = float(t.get("ht") or 0)
+        ir = float(t.get("ir_rate") or 0)
+        tva = round(ht * 0.1925, 2)
+        ir_amt = round(ht * ir, 2)
+        total_tax = round(tva + ir_amt, 2)
+        ttc = round(ht + tva, 2)
+        net = round(ttc - ir_amt, 2)
+        t["tva"] = tva
+        t["total_tax"] = total_tax
+        t["ttc"] = ttc
+        t["net_a_payer"] = net
+    except Exception:
+        pass
+    return t
+
+app = FastAPI(title="CAMTEL Budget App")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"]
+)
+
+BASE_DIR = os.path.dirname(__file__)
+STATIC_DIR = os.path.join(BASE_DIR, "static")
+TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
+os.makedirs(STATIC_DIR, exist_ok=True)
+os.makedirs(TEMPLATES_DIR, exist_ok=True)
+
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
 @app.on_event("startup")
 def _startup():
-    init_db()
-    # seed admin user if configured and not exists
-    admin_user = os.getenv("ADMIN_USERNAME")
-    admin_pass = os.getenv("ADMIN_PASSWORD")
-    if admin_user and admin_pass:
-        db = SessionLocal()
-        try:
-            u = db.query(models.User).filter(models.User.username == admin_user).first()
-            if not u:
-                u = models.User(
-                    username=admin_user,
-                    password_hash=hash_password(admin_pass),
-                    role=models.UserRole.admin,
-                    is_active=True,
-                )
-                db.add(u)
-                db.commit()
-        finally:
-            db.close()
-
-
-# ---------------- Auth helpers ----------------
-
-def current_user(request: Request, db: Session = Depends(get_db)) -> models.User:
-    token = request.cookies.get("access_token")
-    if not token:
-        raise HTTPException(status_code=401, detail="Not logged in")
-    data = decode_token(token)
-    if not data or "sub" not in data:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    u = db.query(models.User).filter(models.User.id == int(data["sub"])).first()
-    if not u or not u.is_active:
-        raise HTTPException(status_code=401, detail="User not found")
-    return u
-
-
-def require_admin(u: models.User = Depends(current_user)) -> models.User:
-    if u.role != models.UserRole.admin:
-        raise HTTPException(status_code=403, detail="Admin only")
-    return u
-
-
-# ---------------- Pages ----------------
+    db = SessionLocal()
+    try:
+        ensure_admin(db)
+    finally:
+        db.close()
 
 @app.get("/", response_class=HTMLResponse)
-def home(request: Request, db: Session = Depends(get_db)):
-    # if logged in => go to transactions
-    token = request.cookies.get("access_token")
+def home(request: Request):
+    token = request.cookies.get("session")
     if token:
         try:
-            decode_token(token)
-            return RedirectResponse(url="/transactions", status_code=302)
+            signer.loads(token, max_age=60*60*24*7)
+            return RedirectResponse("/app", status_code=302)
         except Exception:
             pass
-    return RedirectResponse(url="/login", status_code=302)
+    return templates.TemplateResponse("login.html", {"request": request})
 
+@app.get("/app", response_class=HTMLResponse)
+def app_ui(request: Request, user: User = Depends(get_current_user)):
+    return templates.TemplateResponse("app.html", {"request": request, "user": user})
 
-@app.get("/login", response_class=HTMLResponse)
-def login_get(request: Request):
-    return templates.TemplateResponse("login.html", {"request": request, "app_name": APP_NAME})
-
-
-@app.post("/login")
-def login_post(
-    request: Request,
-    username: str = Form(...),
-    password: str = Form(...),
-    db: Session = Depends(get_db),
-):
-    u = db.query(models.User).filter(models.User.username == username).first()
-    if not u or not verify_password(password, u.password_hash) or not u.is_active:
-        return templates.TemplateResponse(
-            "login.html",
-            {"request": request, "app_name": APP_NAME, "error": "Invalid username or password"},
-            status_code=401,
-        )
-
-    token = create_access_token(subject=str(u.id))
-    resp = RedirectResponse(url="/transactions", status_code=302)
-    resp.set_cookie("access_token", token, httponly=True, samesite="lax")
+@app.post("/api/login")
+async def login(request: Request, db: Session = Depends(db_dep)):
+    data = await request.json()
+    username = (data.get("username") or "").strip()
+    password = (data.get("password") or "").strip()
+    user = db.query(User).filter(User.username == username).first()
+    if not user or not verify_pw(password, user.password_hash):
+        return JSONResponse({"ok": False, "error": "Invalid username or password"}, status_code=401)
+    token = signer.dumps({"u": user.username})
+    resp = JSONResponse({"ok": True, "role": user.role, "department": user.department})
+    resp.set_cookie("session", token, httponly=True, samesite="lax", max_age=60*60*24*7)
     return resp
 
-
-@app.get("/logout")
+@app.post("/api/logout")
 def logout():
-    resp = RedirectResponse(url="/login", status_code=302)
-    resp.delete_cookie("access_token")
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie("session")
     return resp
 
-
-@app.get("/admin/users", response_class=HTMLResponse)
-def admin_users(request: Request, db: Session = Depends(get_db), me: models.User = Depends(require_admin)):
-    users = db.query(models.User).order_by(models.User.username).all()
-    return templates.TemplateResponse(
-        "admin_users.html",
-        {"request": request, "app_name": APP_NAME, "me": me, "users": users},
-    )
-
-
-@app.post("/admin/users/create")
-def admin_users_create(
-    username: str = Form(...),
-    password: str = Form(...),
-    role: str = Form(...),
-    db: Session = Depends(get_db),
-    me: models.User = Depends(require_admin),
+@app.get("/api/transactions")
+def list_transactions(
+    year: int = datetime.utcnow().year,
+    department: Optional[str] = None,
+    doc_type: Optional[str] = None,
+    q: Optional[str] = None,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(db_dep),
 ):
-    if db.query(models.User).filter(models.User.username == username).first():
-        raise HTTPException(status_code=400, detail="Username already exists")
-    u = models.User(
-        username=username,
-        password_hash=hash_password(password),
-        role=models.UserRole(role),
-        is_active=True,
-    )
-    db.add(u)
-    db.commit()
-    return RedirectResponse(url="/admin/users", status_code=302)
-
-
-@app.get("/admin/budget-lines", response_class=HTMLResponse)
-def admin_budget_lines(request: Request, db: Session = Depends(get_db), me: models.User = Depends(require_admin)):
-    year = int(request.query_params.get("year", datetime.now().year))
-    lines = (
-        db.query(models.BudgetLine)
-        .filter(models.BudgetLine.year == year)
-        .order_by(models.BudgetLine.department, models.BudgetLine.code)
-        .all()
-    )
-
-    engaged_rows = (
-        db.query(models.Transaction.budget_line_id, func.coalesce(func.sum(models.Transaction.amount), 0.0))
-        .filter(models.Transaction.year == year)
-        .group_by(models.Transaction.budget_line_id)
-        .all()
-    )
-    engaged_map = {bid: float(total) for bid, total in engaged_rows}
-    return templates.TemplateResponse(
-        "admin_budget_lines.html",
-        {"request": request, "app_name": APP_NAME, "me": me, "year": year, "lines": lines},
-    )
-
-
-@app.post("/admin/budget-lines/create")
-def admin_budget_lines_create(
-    year: int = Form(...),
-    department: str = Form(...),
-    code: str = Form(...),
-    title: str = Form(...),
-    cp: float = Form(...),
-    db: Session = Depends(get_db),
-    me: models.User = Depends(require_admin),
-):
-    bl = models.BudgetLine(year=year, department=department, code=code, title=title, cp=cp)
-    db.add(bl)
-    db.commit()
-    return RedirectResponse(url=f"/admin/budget-lines?year={year}", status_code=302)
-
-
-@app.get("/transactions", response_class=HTMLResponse)
-def transactions_list(
-    request: Request,
-    db: Session = Depends(get_db),
-    me: models.User = Depends(current_user),
-):
-    year = int(request.query_params.get("year", datetime.now().year))
-    dept = request.query_params.get("dept", "")
-    doc = request.query_params.get("doc", "")
-    q = request.query_params.get("q", "").strip()
-
-    query = db.query(models.Transaction).filter(models.Transaction.year == year)
-
-    # Department filter: BUM/DIG/DRH
-    if dept:
-        query = query.filter(models.Transaction.department == dept)
-
-    if doc:
-        query = query.filter(models.Transaction.doc_type == doc)
-
+    dept = department or user.department
+    if user.role != "admin":
+        dept = user.department
+    qry = db.query(Transaction).filter(Transaction.year == year, Transaction.department == dept)
+    if doc_type and doc_type != "All":
+        qry = qry.filter(Transaction.doc_type == doc_type)
     if q:
         like = f"%{q}%"
-        query = query.filter(
-            (models.Transaction.code_ref.ilike(like))
-            | (models.Transaction.title.ilike(like))
-            | (models.Transaction.budget_line_code.ilike(like))
-        )
+        qry = qry.filter((Transaction.code_ref.like(like)) | (Transaction.doc.like(like)) | (Transaction.budget_line.like(like)))
+    rows = qry.order_by(Transaction.created_at.desc()).limit(500).all()
+    return [{
+        "id": r.id, "created_at": r.created_at.isoformat(), "created_by": r.created_by,
+        "year": r.year, "department": r.department, "doc_type": r.doc_type,
+        "code_ref": r.code_ref, "direction": r.direction, "doc": r.doc,
+        "budget_line": r.budget_line, "amount_fcfa": r.amount_fcfa, "status": r.status, "tx_date": r.tx_date,
+        "date_aller": r.date_aller, "date_retour": r.date_retour, "days": r.days, "amount_per_day": r.amount_per_day, "om_total": r.om_total,
+        "ht": r.ht, "tva": r.tva, "ir_rate": r.ir_rate, "total_tax": r.total_tax, "net_a_payer": r.net_a_payer, "ttc": r.ttc,
+    } for r in rows]
 
-    txs = query.order_by(models.Transaction.created_at.desc()).limit(500).all()
-
-    # dropdown data
-    years = [y[0] for y in db.query(models.Transaction.year).distinct().order_by(models.Transaction.year.desc()).all()]
-    if year not in years:
-        years = [year] + years
-
-    departments = ["", "BUM", "DIG", "DRH"]
-    docs = ["", "OM", "BC", "AUTRE"]
-
-    return templates.TemplateResponse(
-        "transactions.html",
-        {
-            "request": request,
-            "app_name": APP_NAME,
-            "me": me,
-            "year": year,
-            "dept": dept,
-            "doc": doc,
-            "q": q,
-            "years": years,
-            "departments": departments,
-            "docs": docs,
-            "txs": txs,
-        },
+@app.post("/api/transactions")
+async def create_transaction(request: Request, user: User = Depends(get_current_user), db: Session = Depends(db_dep)):
+    data = await request.json()
+    data = apply_om_calc(apply_bc_tax(data))
+    dept = data.get("department") or user.department
+    if user.role != "admin":
+        dept = user.department
+    tx = Transaction(
+        created_by=user.username,
+        year=int(data.get("year") or datetime.utcnow().year),
+        department=dept,
+        doc_type=(data.get("doc_type") or "OM"),
+        code_ref=data.get("code_ref"),
+        direction=data.get("direction"),
+        doc=data.get("doc"),
+        budget_line=(data.get("budget_line") or "N/A"),
+        amount_fcfa=float(data.get("amount_fcfa") or 0),
+        status=(data.get("status") or "Draft"),
+        tx_date=(data.get("tx_date") or datetime.utcnow().strftime("%Y-%m-%d")),
+        date_aller=data.get("date_aller"),
+        date_retour=data.get("date_retour"),
+        days=data.get("days"),
+        amount_per_day=data.get("amount_per_day"),
+        om_total=data.get("om_total"),
+        ht=data.get("ht"),
+        tva=data.get("tva"),
+        ir_rate=data.get("ir_rate"),
+        total_tax=data.get("total_tax"),
+        net_a_payer=data.get("net_a_payer"),
+        ttc=data.get("ttc"),
     )
-
-
-@app.get("/transactions/new", response_class=HTMLResponse)
-def transactions_new_get(
-    request: Request,
-    db: Session = Depends(get_db),
-    me: models.User = Depends(current_user),
-):
-    year = int(request.query_params.get("year", datetime.now().year))
-    department = request.query_params.get("dept", "BUM")
-
-    # Budget lines filtered by department
-    lines = (
-        db.query(models.BudgetLine)
-        .filter(models.BudgetLine.year == year)
-        .filter(models.BudgetLine.department == department)
-        .order_by(models.BudgetLine.code)
-        .all()
-    )
-
-    return templates.TemplateResponse(
-        "transaction_new.html",
-        {
-            "request": request,
-            "app_name": APP_NAME,
-            "me": me,
-            "year": year,
-            "department": department,
-            "lines": lines,
-            "engaged_map": engaged_map,
-        },
-    )
-
-
-@app.post("/transactions/new")
-def transactions_new_post(
-    me: models.User = Depends(current_user),
-    db: Session = Depends(get_db),
-    year: int = Form(...),
-    department: str = Form(...),
-    doc_type: str = Form(...),
-    budget_line_id: int = Form(...),
-    code_ref: str = Form(""),
-    title: str = Form(""),
-    date_doc: str = Form(""),
-    # OM fields
-    date_aller: str = Form(""),
-    date_retour: str = Form(""),
-    amount_per_day: float = Form(0.0),
-    # BC fields
-    ht: float = Form(0.0),
-    ir_rate: float = Form(0.0),
-    # Other doc type amount
-    amount_other: float = Form(0.0),
-):
-    bl = db.query(models.BudgetLine).filter(models.BudgetLine.id == budget_line_id).first()
-    if not bl:
-        raise HTTPException(status_code=400, detail="Budget line not found")
-
-    # Parse dates
-    def parse_date(s: str) -> Optional[datetime]:
-        s = (s or "").strip()
-        if not s:
-            return None
-        return datetime.fromisoformat(s)
-
-    d_doc = parse_date(date_doc)
-    d_aller = parse_date(date_aller)
-    d_retour = parse_date(date_retour)
-
-    tx = models.Transaction(
-        year=year,
-        department=department,
-        doc_type=doc_type,
-        budget_line_id=bl.id,
-        budget_line_code=bl.code,
-        budget_line_title=bl.title,
-        code_ref=code_ref,
-        title=title,
-        date_doc=d_doc,
-        created_by=me.username,
-    )
-
-    # OM auto-calculation
-    if doc_type == "OM":
-        tx.om_date_aller = d_aller
-        tx.om_date_retour = d_retour
-        tx.om_amount_per_day = amount_per_day
-        if d_aller and d_retour:
-            days = (d_retour.date() - d_aller.date()).days + 1
-            if days < 0:
-                days = 0
-            tx.om_days = days
-            tx.amount = round(days * amount_per_day, 2)
-        else:
-            tx.om_days = 0
-            tx.amount = 0.0
-
-    # BC Cameroon tax system
-    elif doc_type == "BC":
-        tx.bc_ht = ht
-        tx.bc_tva_rate = 0.1925
-        tx.bc_ir_rate = ir_rate
-        tva = round(ht * 0.1925, 2)
-        ir = round(ht * (ir_rate / 100.0), 2) if ir_rate else 0.0
-        total_tax = round(tva + ir, 2)
-        ttc = round(ht + tva, 2)
-        net = round(ttc - ir, 2)
-        tx.bc_tva = tva
-        tx.bc_ir = ir
-        tx.bc_total_tax = total_tax
-        tx.bc_ttc = ttc
-        tx.bc_net = net
-        tx.amount = net
-
-    else:
-        # Other doc type: manual amount
-        tx.amount = float(amount_other or 0.0)
-
     db.add(tx)
     db.commit()
+    return {"ok": True, "id": tx.id}
 
-    return RedirectResponse(url=f"/transactions?year={year}&dept={department}", status_code=302)
-
-@app.post("/transactions/delete")
-def transactions_delete(
-    me: models.User = Depends(current_user),
-    db: Session = Depends(get_db),
-    tx_id: int = Form(...),
-):
-    tx = db.query(models.Transaction).filter(models.Transaction.id == tx_id).first()
+@app.put("/api/transactions/{tx_id}")
+async def update_transaction(tx_id: int, request: Request, user: User = Depends(get_current_user), db: Session = Depends(db_dep)):
+    tx = db.query(Transaction).filter(Transaction.id == tx_id).first()
     if not tx:
-        raise HTTPException(status_code=404, detail="Not found")
-    # only admin can delete
-    if me.role != models.UserRole.admin:
-        raise HTTPException(status_code=403, detail="Admin only")
-    year = tx.year
-    dept = tx.department
+        raise HTTPException(404, "not found")
+    if user.role != "admin" and tx.department != user.department:
+        raise HTTPException(403, "forbidden")
+    data = await request.json()
+    data = apply_om_calc(apply_bc_tax(data))
+    for field in [
+        "year","doc_type","code_ref","direction","doc","budget_line","amount_fcfa","status","tx_date",
+        "date_aller","date_retour","days","amount_per_day","om_total","ht","tva","ir_rate","total_tax","net_a_payer","ttc"
+    ]:
+        if field in data:
+            setattr(tx, field, data[field])
+    db.commit()
+    return {"ok": True}
+
+@app.delete("/api/transactions/{tx_id}")
+def delete_transaction(tx_id: int, user: User = Depends(get_current_user), db: Session = Depends(db_dep)):
+    tx = db.query(Transaction).filter(Transaction.id == tx_id).first()
+    if not tx:
+        return {"ok": True}
+    if user.role != "admin" and tx.department != user.department:
+        raise HTTPException(403, "forbidden")
     db.delete(tx)
     db.commit()
-    return RedirectResponse(url=f"/transactions?year={year}&dept={dept}", status_code=302)
+    return {"ok": True}
 
+@app.post("/api/fiche/pdf")
+async def fiche_pdf(request: Request, user: User = Depends(get_current_user), db: Session = Depends(db_dep)):
+    data = await request.json()
+    ids = data.get("ids") or []
+    if not ids:
+        raise HTTPException(400, "ids required")
+    rows = []
+    for i in ids:
+        tx = db.query(Transaction).filter(Transaction.id == int(i)).first()
+        if tx and (user.role == "admin" or tx.department == user.department):
+            rows.append(tx)
 
-@app.post("/fiche/pdf")
-def fiche_pdf(
-    request: Request,
-    me: models.User = Depends(current_user),
-    db: Session = Depends(get_db),
-    tx_ids: str = Form(...),  # comma-separated ids in exact order
-):
-    ids = [int(x) for x in tx_ids.split(",") if x.strip().isdigit()]
-    if len(ids) == 0:
-        raise HTTPException(status_code=400, detail="Select at least 1 transaction")
-    if len(ids) > 2:
-        ids = ids[:2]
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
 
-    txs = db.query(models.Transaction).filter(models.Transaction.id.in_(ids)).all()
-    # preserve order
-    tx_map = {t.id: t for t in txs}
-    ordered = [tx_map[i] for i in ids if i in tx_map]
+    out_path = os.path.join(STATIC_DIR, f"fiche_{user.username}_{int(datetime.utcnow().timestamp())}.pdf")
+    c = canvas.Canvas(out_path, pagesize=A4)
+    width, height = A4
 
-    pdf_bytes = build_fiche_pdf(ordered, logo_path=os.path.join(STATIC_DIR, "img", "logo.png"))
+    def draw_one(y_top, tx: Transaction):
+        left = 40
+        c.setFont("Helvetica-Bold", 12)
+        c.drawString(left, y_top, "CAMTEL - FICHE BUDGET")
+        c.setFont("Helvetica", 10)
+        c.drawString(left, y_top-18, f"Department: {tx.department}    DocType: {tx.doc_type}    Date: {tx.tx_date}")
+        c.drawString(left, y_top-34, f"Code/Ref: {tx.code_ref or ''}    Doc: {tx.doc or ''}    Direction: {tx.direction or ''}")
+        c.drawString(left, y_top-50, f"Budget line: {tx.budget_line}")
+        c.drawString(left, y_top-66, f"Amount (FCFA): {tx.amount_fcfa:,.0f}    Status: {tx.status}")
+        c.setFont("Helvetica", 9)
+        c.drawString(left, y_top-95, "Prepared by: ____________________")
+        c.drawString(left+260, y_top-95, "Approved by: ____________________")
+        c.line(left, y_top-110, width-left, y_top-110)
 
-    return StreamingResponse(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": "inline; filename=fiche.pdf"},
-    )
+    y_positions = [height-60, height/2+20]
+    for idx, tx in enumerate(rows):
+        if idx % 2 == 0 and idx != 0:
+            c.showPage()
+        draw_one(y_positions[idx % 2], tx)
+    c.save()
+    return {"ok": True, "url": f"/static/{os.path.basename(out_path)}"}
+
+@app.get("/health")
+def health():
+    return {"ok": True}
