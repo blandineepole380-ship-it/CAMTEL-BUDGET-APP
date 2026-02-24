@@ -1,35 +1,77 @@
-# CAMTEL Budget App (Render-ready)
+# CAMTEL Budget App v2 — Render-ready
 
-This is a **simple, stable** web app that matches your requested features:
+Full-featured budget tracking app for CAMTEL with:
+- ✅ **SQLite persistent database** (survives restarts)
+- ✅ **Dashboard with charts** (by direction, by month)
+- ✅ **Budget limits per direction** with progress bars & available balance
+- ✅ **CORS support** for Lovable frontend integration
+- ✅ **Bearer token auth** for API clients
 
-- ✅ Login system (Admin + User roles)
-- ✅ Multi-PC shared database (Render Postgres)
-- ✅ Department filter (BUM/DIG/DRH)
-- ✅ OM auto calculation (dates, days, amount/day, total)
-- ✅ BC Cameroon tax system (HT, TVA 19.25%, IR dropdown 2.2% / 5.5%, totals)
-- ✅ Fiche PDF (2 transactions per A4, signature blocks, exact selection order)
+---
 
 ## Deploy on Render (Docker)
-1. Upload this folder to GitHub (root must contain `Dockerfile`).
-2. On Render: **New Web Service** → connect GitHub repo → choose **Docker**.
-3. Set Environment Variables:
-   - `DATABASE_URL` = your Render Postgres connection string
-   - `SECRET_KEY` = random long string
-   - `ADMIN_USERNAME` / `ADMIN_PASSWORD` = first admin login
-4. Deploy.
 
-## Local run
-```bash
-python -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-export SECRET_KEY=dev
-uvicorn main:app --reload
+1. Push these files to your GitHub repo root.
+2. In Render: **New Web Service** → connect repo → Environment: **Docker**
+3. Add Environment Variables:
+
+| Variable | Description | Default |
+|---|---|---|
+| `SECRET_KEY` | Long random string for sessions | `change-me` |
+| `ADMIN_USER` | Login username | `admin` |
+| `ADMIN_PASS` | Login password | `admin123` |
+| `DB_PATH` | SQLite file path | `camtel.db` |
+| `FRONTEND_ORIGIN` | Your Lovable app URL (for CORS) | `*` |
+
+4. Deploy → Default login: `admin / admin123`
+
+---
+
+## Connecting your Lovable Frontend
+
+The backend exposes a full REST API:
+
+### Auth
+```
+POST /api/login/token
+Body: { "username": "admin", "password": "admin123" }
+Returns: { "token": "...", "user": "admin" }
+```
+Use the token as: `Authorization: Bearer <token>`
+
+### Transactions
+```
+GET  /api/tx?year=2025&q=search&direction=DRH
+POST /api/tx         { code, direction, doc, budget_line, title, nature, date, amount, year, status }
+GET  /api/tx/:id
+DELETE /api/tx/:id
 ```
 
-Open http://127.0.0.1:8000
+### Budget Limits
+```
+GET    /api/budget-limits?year=2025
+POST   /api/budget-limits   { direction, year, limit_amount }
+DELETE /api/budget-limits/:id
+```
 
-## Notes
-- If you don’t create budget lines, the “New Transaction” budget line dropdown will be empty.
-- Admin can add budget lines in **Admin → Manage Budget Lines**.
-- Replace the logo at `static/img/logo.png` if you want a different one.
+### Dashboard Summary
+```
+GET /api/dashboard?year=2025
+Returns: { total_limit, total_engaged, total_pending, available, by_direction, by_month, limits }
+```
+
+### Fiche (printable)
+```
+GET /fiche/:id   → HTML printable page
+```
+
+---
+
+## Persistent Storage on Render
+
+By default, Render's disk resets on redeploy. To keep data:
+1. In Render: go to your service → **Disks** → Add a disk
+2. Mount path: `/data`
+3. Set env var: `DB_PATH=/data/camtel.db`
+
+This ensures your SQLite database survives all redeployments.
