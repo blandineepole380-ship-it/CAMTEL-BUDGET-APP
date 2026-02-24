@@ -1,74 +1,64 @@
-# CAMTEL Budget App v4 — Guide de déploiement
+# CAMTEL Budget App v5 — Guide de déploiement & utilisation
 
-## Nouveautés v4 (vs v3)
-- ✅ Lignes budgétaires par direction avec imputation comptable complète
-- ✅ 46 directions CAMTEL préconfigurées (BUM, BUT, BUF, DG, DRH, DICOM, DIRCAB...)
-- ✅ Fiche DCF officielle: DISPONIBLE OUI✓/NON✓, montants formatés (300 000 000 FCFA)
-- ✅ 2 fiches par page A4, sélection multiple pour impression batch
-- ✅ Multi-utilisateurs: Admin, Directeur DCF, Sous-Dir. Budget, Agent, Observateur
-- ✅ Accès par direction: chaque agent voit uniquement ses directions assignées
-- ✅ Import/Export CSV: transactions historiques + budgets annuels (2026, 2027...)
-- ✅ Rapports mensuels téléchargeables
-- ✅ Avis de la DCF (remplacé SAAF)
+## Nouveautés v5
+- Tableau Excel coloré : colonnes color-codées (violet=date, cyan=direction, bleu=imputation)
+- Saisie inline : cliquez + Nouvelle ligne -> ligne s'ajoute dans le tableau comme Excel
+- Logo CAMTEL : affiché dans le header design "C" bleu cyan
+- Filtrage direction : sélectionner direction charge ses lignes budgétaires uniquement
+- Montants formatés : 27 311 774 252 FCFA (espaces)
+- DEPASSEMENT en rouge : fond rose/rouge comme Excel
+- Import CSV corrigé : accepte votre format exact (CODE/REF NUMBER, DATE DE RECEPTION...)
+- Fiche DCF : 2 fiches par page A4, Avis de la DCF, DISPONIBLE OUI/NON coches
 
-## Déploiement sur Render
+## Deploiement Render - Remplacer main.py dans GitHub
 
-### Fichiers requis dans votre repo GitHub:
-- `main.py` — Application complète
-- `requirements.txt` — Dépendances Python
-- `Dockerfile` — Configuration Docker
+Variables d'environnement:
+  SECRET_KEY  = cle aleatoire
+  ADMIN_USER  = admin
+  ADMIN_PASS  = votre_mot_de_passe
+  DB_PATH     = /data/camtel.db  (avec disque persistant)
 
-### Variables d'environnement:
-| Variable | Description | Défaut |
-|---|---|---|
-| `SECRET_KEY` | Clé secrète sessions (changer!) | `change-me` |
-| `ADMIN_USER` | Identifiant admin | `admin` |
-| `ADMIN_PASS` | Mot de passe admin | `admin123` |
-| `DB_PATH` | Chemin SQLite | `camtel.db` |
-| `FRONTEND_ORIGIN` | URL Lovable (CORS) | `*` |
+## Premier demarrage - etapes obligatoires
 
-### Données persistantes (IMPORTANT sur Render):
-1. Render → votre service → **Disks** → Add disk
-2. Mount path: `/data`
-3. Définir `DB_PATH=/data/camtel.db`
+### Etape 1 : Importer les lignes budgetaires
+1. Aller dans Import/Export
+2. Section Importer lignes budgetaires
+3. Telecharger template_budget_lines_import.csv
+4. Remplir avec vos imputations comptables par direction
+5. Cliquer Importer lignes budget
 
-## Premier démarrage
-1. Connectez-vous: `admin` / `admin123`
-2. Allez dans **⬆ Import/Export** → importez vos lignes budgétaires CSV
-3. Ou dans **Lignes Budget** → créez les lignes manuellement
-4. Dans **👥 Utilisateurs** → créez les comptes de vos agents
-5. Assignez les directions à chaque agent
+SANS les lignes budgetaires importees, le tableau de bord reste a zero.
 
-## Import du budget annuel (2026, 2027...)
-1. Télécharger `template_budget_lines_import.csv`
-2. Remplir avec les lignes du nouveau budget
-3. Importer via **⬆ Import/Export** → "Importer des lignes budgétaires"
+### Etape 2 : Importer les transactions historiques
+1. Section Importer transactions
+2. Telecharger template_transactions_import.csv
+3. Copier vos donnees depuis DATA_ENTRY_TABLE_2025.csv
+4. Saisir l'annee : 2025
+5. Cliquer Importer
 
-## Import de transactions historiques
-1. Télécharger `template_transactions_import.csv`
-2. Remplir avec vos transactions passées
-3. Importer via **⬆ Import/Export** → "Importer des transactions"
+Colonnes acceptees:
+DATE DE RECEPTION | CODE /REF NUMBER | DIRECTION | IMPUTATION COMPTABLE | 
+NATURE (DEPENSE COURANTE...) | INTITULE DE LA COMMANDE | MONTANT | STATUT BUDGET
 
-## Rôles et accès
-| Rôle | Transactions | Lignes Budget | Utilisateurs | Rapports |
-|---|---|---|---|---|
-| admin | ✅ Total | ✅ Total | ✅ | ✅ |
-| dcf_dir | ✅ Total | ✅ Total | ✅ | ✅ |
-| dcf_sub | ✅ Total | ✅ Total | ✅ | ✅ |
-| agent | ✅ Ses directions | 👁 Lecture | ✗ | 👁 Lecture |
-| viewer | 👁 Lecture | 👁 Lecture | ✗ | 👁 Lecture |
+### Etape 3 : Creer les utilisateurs
+1. Aller dans Utilisateurs
+2. Ajouter utilisateur : nom, identifiant, mot de passe, role, directions
 
-## API pour Lovable Frontend
-```
-POST /api/login/token   → Bearer token
-GET  /api/transactions?year=&direction=&q=
-POST /api/transactions
-GET  /api/budget-lines?year=&direction=
-GET  /api/dashboard?year=
-GET  /api/export/transactions?year=
-```
+## Utilisation quotidienne
 
-## Fiche d'engagement
-- Cliquez 🖨 sur une transaction → fiche officielle format CAMTEL
-- Cochez plusieurs transactions → "Imprimer sélection" → 2 fiches par page A4
-- Format: DISPONIBLE OUI ✓ ou NON ✓, montants "300 000 000 FCFA", Avis de la DCF
+### Saisir une nouvelle transaction
+1. Onglet Transactions
+2. Cliquer + Nouvelle ligne -> ligne s'ajoute dans le tableau
+3. Selectionner Direction -> lignes budgetaires de cette direction s'affichent
+4. Selectionner Ligne budgetaire -> solde disponible s'affiche
+5. Saisir date, montant, intitule
+6. Cliquer Enregistrer
+
+### Imprimer une fiche officielle DCF
+1. Cocher 1 ou 2 transactions
+2. Cliquer Imprimer selection -> 2 fiches par page A4
+
+## Roles et permissions
+admin, dcf_dir, dcf_sub : acces total + rapports + utilisateurs
+agent : saisie sur ses directions uniquement
+viewer : lecture seule
