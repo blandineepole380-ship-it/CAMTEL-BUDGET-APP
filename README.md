@@ -1,77 +1,74 @@
-# CAMTEL Budget App v2 — Render-ready
+# CAMTEL Budget App v4 — Guide de déploiement
 
-Full-featured budget tracking app for CAMTEL with:
-- ✅ **SQLite persistent database** (survives restarts)
-- ✅ **Dashboard with charts** (by direction, by month)
-- ✅ **Budget limits per direction** with progress bars & available balance
-- ✅ **CORS support** for Lovable frontend integration
-- ✅ **Bearer token auth** for API clients
+## Nouveautés v4 (vs v3)
+- ✅ Lignes budgétaires par direction avec imputation comptable complète
+- ✅ 46 directions CAMTEL préconfigurées (BUM, BUT, BUF, DG, DRH, DICOM, DIRCAB...)
+- ✅ Fiche DCF officielle: DISPONIBLE OUI✓/NON✓, montants formatés (300 000 000 FCFA)
+- ✅ 2 fiches par page A4, sélection multiple pour impression batch
+- ✅ Multi-utilisateurs: Admin, Directeur DCF, Sous-Dir. Budget, Agent, Observateur
+- ✅ Accès par direction: chaque agent voit uniquement ses directions assignées
+- ✅ Import/Export CSV: transactions historiques + budgets annuels (2026, 2027...)
+- ✅ Rapports mensuels téléchargeables
+- ✅ Avis de la DCF (remplacé SAAF)
 
----
+## Déploiement sur Render
 
-## Deploy on Render (Docker)
+### Fichiers requis dans votre repo GitHub:
+- `main.py` — Application complète
+- `requirements.txt` — Dépendances Python
+- `Dockerfile` — Configuration Docker
 
-1. Push these files to your GitHub repo root.
-2. In Render: **New Web Service** → connect repo → Environment: **Docker**
-3. Add Environment Variables:
-
-| Variable | Description | Default |
+### Variables d'environnement:
+| Variable | Description | Défaut |
 |---|---|---|
-| `SECRET_KEY` | Long random string for sessions | `change-me` |
-| `ADMIN_USER` | Login username | `admin` |
-| `ADMIN_PASS` | Login password | `admin123` |
-| `DB_PATH` | SQLite file path | `camtel.db` |
-| `FRONTEND_ORIGIN` | Your Lovable app URL (for CORS) | `*` |
+| `SECRET_KEY` | Clé secrète sessions (changer!) | `change-me` |
+| `ADMIN_USER` | Identifiant admin | `admin` |
+| `ADMIN_PASS` | Mot de passe admin | `admin123` |
+| `DB_PATH` | Chemin SQLite | `camtel.db` |
+| `FRONTEND_ORIGIN` | URL Lovable (CORS) | `*` |
 
-4. Deploy → Default login: `admin / admin123`
-
----
-
-## Connecting your Lovable Frontend
-
-The backend exposes a full REST API:
-
-### Auth
-```
-POST /api/login/token
-Body: { "username": "admin", "password": "admin123" }
-Returns: { "token": "...", "user": "admin" }
-```
-Use the token as: `Authorization: Bearer <token>`
-
-### Transactions
-```
-GET  /api/tx?year=2025&q=search&direction=DRH
-POST /api/tx         { code, direction, doc, budget_line, title, nature, date, amount, year, status }
-GET  /api/tx/:id
-DELETE /api/tx/:id
-```
-
-### Budget Limits
-```
-GET    /api/budget-limits?year=2025
-POST   /api/budget-limits   { direction, year, limit_amount }
-DELETE /api/budget-limits/:id
-```
-
-### Dashboard Summary
-```
-GET /api/dashboard?year=2025
-Returns: { total_limit, total_engaged, total_pending, available, by_direction, by_month, limits }
-```
-
-### Fiche (printable)
-```
-GET /fiche/:id   → HTML printable page
-```
-
----
-
-## Persistent Storage on Render
-
-By default, Render's disk resets on redeploy. To keep data:
-1. In Render: go to your service → **Disks** → Add a disk
+### Données persistantes (IMPORTANT sur Render):
+1. Render → votre service → **Disks** → Add disk
 2. Mount path: `/data`
-3. Set env var: `DB_PATH=/data/camtel.db`
+3. Définir `DB_PATH=/data/camtel.db`
 
-This ensures your SQLite database survives all redeployments.
+## Premier démarrage
+1. Connectez-vous: `admin` / `admin123`
+2. Allez dans **⬆ Import/Export** → importez vos lignes budgétaires CSV
+3. Ou dans **Lignes Budget** → créez les lignes manuellement
+4. Dans **👥 Utilisateurs** → créez les comptes de vos agents
+5. Assignez les directions à chaque agent
+
+## Import du budget annuel (2026, 2027...)
+1. Télécharger `template_budget_lines_import.csv`
+2. Remplir avec les lignes du nouveau budget
+3. Importer via **⬆ Import/Export** → "Importer des lignes budgétaires"
+
+## Import de transactions historiques
+1. Télécharger `template_transactions_import.csv`
+2. Remplir avec vos transactions passées
+3. Importer via **⬆ Import/Export** → "Importer des transactions"
+
+## Rôles et accès
+| Rôle | Transactions | Lignes Budget | Utilisateurs | Rapports |
+|---|---|---|---|---|
+| admin | ✅ Total | ✅ Total | ✅ | ✅ |
+| dcf_dir | ✅ Total | ✅ Total | ✅ | ✅ |
+| dcf_sub | ✅ Total | ✅ Total | ✅ | ✅ |
+| agent | ✅ Ses directions | 👁 Lecture | ✗ | 👁 Lecture |
+| viewer | 👁 Lecture | 👁 Lecture | ✗ | 👁 Lecture |
+
+## API pour Lovable Frontend
+```
+POST /api/login/token   → Bearer token
+GET  /api/transactions?year=&direction=&q=
+POST /api/transactions
+GET  /api/budget-lines?year=&direction=
+GET  /api/dashboard?year=
+GET  /api/export/transactions?year=
+```
+
+## Fiche d'engagement
+- Cliquez 🖨 sur une transaction → fiche officielle format CAMTEL
+- Cochez plusieurs transactions → "Imprimer sélection" → 2 fiches par page A4
+- Format: DISPONIBLE OUI ✓ ou NON ✓, montants "300 000 000 FCFA", Avis de la DCF
