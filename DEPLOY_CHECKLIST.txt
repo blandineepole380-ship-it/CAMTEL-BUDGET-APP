@@ -1,0 +1,46 @@
+CAMTEL BUDGET APP - DEPLOYMENT CHECKLIST
+=========================================
+
+STEP 1: Upload these 5 files to GitHub repo root
+  (https://github.com/blandineepole380-ship-it/CAMTEL-BUDGET-APP)
+
+  ✅ main.py       (1.5 MB - the FastAPI server)
+  ✅ app.html      (160 KB - the main UI)  
+  ✅ login.html    (23 KB - the login page)
+  ✅ Dockerfile    (the Docker build instructions)
+  ✅ requirements.txt (Python packages)
+
+HOW TO UPDATE FILES IN GITHUB:
+  1. Go to your GitHub repo
+  2. Click on a file (e.g. main.py)
+  3. Click the pencil icon (Edit)
+  4. Select ALL content, DELETE it
+  5. Paste the new file content
+  6. Click "Commit changes"
+  7. Repeat for each file
+  8. For NEW files (Dockerfile, app.html, login.html):
+     - Click "Add file" > "Create new file"
+     - Type the filename exactly
+     - Paste content
+     - Commit
+
+STEP 2: Redeploy on Render
+  1. Go to dashboard.render.com
+  2. Click your service
+  3. Click "Manual Deploy" 
+  4. Click "Clear build cache & deploy"
+
+STEP 3: Verify
+  Visit: https://camtel-budget-app.onrender.com/version
+  Should show: {"version":"v9-dark-2026-02-27","status":"ok","files":[...],"db":{...}}
+
+LOGIN CREDENTIALS:
+  Username: admin
+  Password: admin123
+
+WHAT CHANGED (why it now works):
+  - init() function was accidentally deleted in previous edits - NOW RESTORED
+  - Auth switched from cookies to Bearer tokens (more reliable on Render)
+  - Login page now uses JavaScript fetch instead of HTML form POST
+  - Token stored in sessionStorage, sent with every API request
+  - Better error handling throughout
