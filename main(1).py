@@ -225,20 +225,11 @@ def version():
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    # Serve app.html always - JS will redirect to /login if no valid token
-    try:
-        html = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),"app.html"),encoding="utf-8").read()
-    except:
-        html = APP_HTML
-    return HTMLResponse(html)
+    return HTMLResponse(APP_HTML)
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page():
-    try:
-        html = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),"login.html"),encoding="utf-8").read()
-    except:
-        html = LOGIN_HTML
-    return HTMLResponse(html.replace("__ERR__",""))
+    return HTMLResponse(LOGIN_HTML.replace("__ERR__","<div id='__ERR__'></div>"))
 
 @app.post("/api/login")
 def do_login(username: str = Form(...), password: str = Form(...)):
@@ -246,11 +237,7 @@ def do_login(username: str = Form(...), password: str = Form(...)):
         conn.row_factory = sqlite3.Row
         u = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
     if not u or u["password"] != _hash(password):
-        try:
-            html = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),"login.html"),encoding="utf-8").read()
-        except:
-            html = LOGIN_HTML
-        return HTMLResponse(html.replace("__ERR__","<div class='err'>❌ Identifiants incorrects.</div>"), status_code=401)
+        return HTMLResponse(LOGIN_HTML.replace("__ERR__","<div class='err'>❌ Identifiants incorrects.</div>"), status_code=401)
     token = serializer.dumps({"u": username,"role":u["role"],"name":u["full_name"],"dirs":u["directions"]})
     r = RedirectResponse("/",status_code=302)
     r.set_cookie("session",token,httponly=True,samesite="lax")
@@ -1398,6 +1385,7 @@ def _fiche_block(t, db):
     </div>
   </div>
 </div>"""
+
 
 
 
