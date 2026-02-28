@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: camtel-budget-app
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: camtel-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ADMIN_USER
+        value: admin
+      - key: ADMIN_PASS
+        value: admin123
+
+databases:
+  - name: camtel-db
+    databaseName: camtel
+    user: camtel
+    plan: free
