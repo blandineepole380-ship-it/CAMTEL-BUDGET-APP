@@ -1,38 +1,155 @@
 """
 CAMTEL Budget Management System — v10
-Professional FastAPI + SQLAlchemy backend
-PostgreSQL on Render | SQLite for local dev
+Single-file deployment for Render
+PostgreSQL (production) | SQLite (local dev)
 """
-import os, io, csv, json, hashlib, logging
+import os, io, csv, json, hashlib, logging, re as _re
 from datetime import date
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Optional, List
+import base64 as _b64
 
 from fastapi import (FastAPI, Request, Depends, HTTPException,
                      UploadFile, File, Form, Response)
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from itsdangerous import URLSafeSerializer, BadSignature
-from sqlalchemy import func, or_
-from sqlalchemy.orm import Session
+from sqlalchemy import (create_engine, func, or_, Column, Integer, String,
+                        Float, Boolean, DateTime, Text, ForeignKey, UniqueConstraint)
+from sqlalchemy.orm import sessionmaker, declarative_base, Session, relationship
+from sqlalchemy.sql import func as sqlfunc
+from pydantic import BaseModel
 
-from app.database import engine, get_db, Base
-from app import models, crud
-from app.utils.calculations import get_dashboard_data, get_monthly_report, get_budget_status, _tx_dict
-from app.routers import import_data
+# ══════════════════════════════════════════════════════════════════
+# DATABASE
+# ══════════════════════════════════════════════════════════════════
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./camtel.db")
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+IS_SQLITE = DATABASE_URL.startswith("sqlite")
 
-# ── Logging ──────────────────────────────────────────────────────
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False} if IS_SQLITE else {},
+    pool_pre_ping=True,
+    pool_size=1 if IS_SQLITE else 5,
+    max_overflow=0 if IS_SQLITE else 10,
+)
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
+    try:    yield db
+    finally: db.close()
+
+# ══════════════════════════════════════════════════════════════════
+# MODELS — all tables with FK relationships
+# ══════════════════════════════════════════════════════════════════
+class User(Base):
+    __tablename__ = "users"
+    id         = Column(Integer, primary_key=True, index=True)
+    username   = Column(String(80),  unique=True, nullable=False, index=True)
+    password   = Column(String(128), nullable=False)
+    full_name  = Column(String(200), default="")
+    role       = Column(String(20),  default="agent")
+    directions = Column(Text,        default="[]")
+    email      = Column(String(200), default="")
+    is_active  = Column(Boolean,     default=True)
+    created_at = Column(DateTime(timezone=True), server_default=sqlfunc.now())
+
+class Department(Base):
+    __tablename__ = "departments"
+    id        = Column(Integer, primary_key=True, index=True)
+    code      = Column(String(20), unique=True, nullable=False)
+    name      = Column(String(200), default="")
+    is_active = Column(Boolean, default=True)
+
+class FiscalYear(Base):
+    __tablename__ = "fiscal_years"
+    id      = Column(Integer, primary_key=True, index=True)
+    year    = Column(Integer, unique=True, nullable=False, index=True)
+    is_open = Column(Boolean, default=True)
+
+class BudgetLine(Base):
+    __tablename__ = "budget_lines"
+    __table_args__ = (UniqueConstraint("year", "direction", "imputation"),)
+    id         = Column(Integer, primary_key=True, index=True)
+    year       = Column(Integer, nullable=False, index=True)
+    direction  = Column(String(50), nullable=False, index=True)
+    imputation = Column(String(50), nullable=False, index=True)
+    libelle    = Column(String(500), default="")
+    nature     = Column(String(100), default="DEPENSE COURANTE")
+    budget_cp  = Column(Float, default=0.0)
+    created_at = Column(DateTime(timezone=True), server_default=sqlfunc.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=sqlfunc.now())
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+    id              = Column(Integer, primary_key=True, index=True)
+    code_ref        = Column(String(100), default="", index=True)
+    date_reception  = Column(String(20),  nullable=False, index=True)
+    direction       = Column(String(50),  default="", index=True)
+    imputation      = Column(String(50),  default="", index=True)
+    nature          = Column(String(100), default="DEPENSE COURANTE")
+    intitule        = Column(String(500), default="")
+    description     = Column(Text,        default="")
+    montant         = Column(Float,       default=0.0)
+    year            = Column(Integer,     nullable=False, index=True)
+    status          = Column(String(20),  default="validated")
+    statut_budget   = Column(String(20),  default="OK")
+    created_by      = Column(String(80),  default="")
+    created_by_name = Column(String(200), default="")
+    attachments     = Column(Text,        default="[]")
+    designation     = Column(String(20),  default="NC")
+    departure_date  = Column(String(20),  nullable=True)
+    return_date     = Column(String(20),  nullable=True)
+    number_of_days  = Column(Integer,     nullable=True)
+    amount_per_day  = Column(Float,       nullable=True)
+    num_compte      = Column(String(50),  default="")
+    num_compte_name = Column(String(200), default="")
+    created_at      = Column(DateTime(timezone=True), server_default=sqlfunc.now())
+    updated_at      = Column(DateTime(timezone=True), onupdate=sqlfunc.now())
+
+class PtaSubmission(Base):
+    __tablename__ = "pta_submissions"
+    id              = Column(Integer, primary_key=True, index=True)
+    direction       = Column(String(50),  nullable=False, index=True)
+    year            = Column(Integer,     nullable=False, index=True)
+    sp_code         = Column(String(50),  default="")
+    action_code     = Column(String(50),  default="")
+    action_nom      = Column(String(500), default="")
+    activite_code   = Column(String(50),  default="")
+    activite_nom    = Column(String(500), default="")
+    tache_code      = Column(String(50),  default="")
+    tache_nom       = Column(String(500), default="")
+    compte          = Column(String(50),  default="")
+    nature          = Column(String(100), default="")
+    budget_type     = Column(String(10),  default="OPEX")
+    qte             = Column(Float,       default=1.0)
+    pu              = Column(Float,       default=0.0)
+    montant_ae      = Column(Float,       default=0.0)
+    montant_cp      = Column(Float,       default=0.0)
+    mensualisation  = Column(String(20),  default="ANNUEL")
+    status          = Column(String(20),  default="draft")
+    created_by      = Column(String(80),  default="")
+    created_by_name = Column(String(200), default="")
+    created_at      = Column(DateTime(timezone=True), server_default=sqlfunc.now())
+    updated_at      = Column(DateTime(timezone=True), onupdate=sqlfunc.now())
+
+
+# ══════════════════════════════════════════════════════════════════
+# CONFIG & AUTH
+# ══════════════════════════════════════════════════════════════════
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("camtel")
 
-# ── Config ───────────────────────────────────────────────────────
-SECRET_KEY = os.environ.get("SECRET_KEY",  "camtel-secret-v10")
-ADMIN_USER = os.environ.get("ADMIN_USER",  "admin")
-ADMIN_PASS = os.environ.get("ADMIN_PASS",  "admin123")
+SECRET_KEY = os.environ.get("SECRET_KEY","camtel-secret-v10")
+ADMIN_USER = os.environ.get("ADMIN_USER","admin")
+ADMIN_PASS = os.environ.get("ADMIN_PASS","admin123")
 serializer = URLSafeSerializer(SECRET_KEY, salt="camtel-v5")
 
-def _hash(p: str) -> str:
-    return hashlib.sha256(p.encode()).hexdigest()
+def _hash(p): return hashlib.sha256(p.encode()).hexdigest()
 
 ALL_DIRS = [
     "BUM","BUT","BUF","DG","DRH","DICOM","DIRCAB","DCRA","DAMR","DC","DNQ",
@@ -40,6 +157,7 @@ ALL_DIRS = [
     "RRSM","RREM","RROM","RRNOM","RRSOM","RRAM","RRNM","RRENM","DCRF","DRLF","RRSF",
     "RREF","RROF","RRNOF","RRSOF","RRAF","RRNF","RRENF","DCRT","DRLT","RRNOT","RRENT"
 ]
+
 
 PLAN_COMPTABLE = [
     # Class 2 - Immobilisations
@@ -77,26 +195,207 @@ PLAN_COMPTABLE = [
     {"num":"64110000","nom":"Salaires et traitements","cat":"Charges de personnel"},
 ]
 
-PLANNING_REFERENCE = {}
 
-# ── DB Bootstrap ─────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════
+# ANALYTICS ENGINE — reads from DB, no hardcoded values
+# ══════════════════════════════════════════════════════════════════
+def _tx_dict(t):
+    return {
+        "id":t.id,"code_ref":t.code_ref or "","date_reception":t.date_reception or "",
+        "direction":t.direction or "","imputation":t.imputation or "","nature":t.nature or "",
+        "intitule":t.intitule or "","description":t.description or "","montant":t.montant or 0.0,
+        "year":t.year,"status":t.status or "validated","statut_budget":t.statut_budget or "OK",
+        "created_by":t.created_by or "","created_by_name":t.created_by_name or "",
+        "designation":t.designation or "NC","num_compte":t.num_compte or "",
+        "num_compte_name":t.num_compte_name or "","attachments":t.attachments or "[]",
+        "departure_date":t.departure_date,"return_date":t.return_date,
+        "number_of_days":t.number_of_days,"amount_per_day":t.amount_per_day,
+    }
+
+def calc_available(db, imputation, year):
+    bl = db.query(BudgetLine).filter_by(imputation=imputation, year=year).first()
+    if not bl: return 0.0
+    eng = db.query(func.coalesce(func.sum(Transaction.montant),0)).filter(
+        Transaction.imputation==imputation, Transaction.year==year,
+        Transaction.status=="validated").scalar() or 0.0
+    return bl.budget_cp - eng
+
+def budget_status(db, imputation, year, new_amount=0.0):
+    return "OK" if calc_available(db, imputation, year) - new_amount >= 0 else "DEPASSEMENT"
+
+def dashboard_data(db, dirs, year):
+    if not dirs: return {"total_budget":0,"total_engage":0,"total_pending":0,"total_dispo":0,
+        "tx_count":0,"pending_count":0,"by_dir":{},"by_month":[0]*12,"bl_by_dir":{},"overdrawn":[],"recent":[]}
+    tq = db.query(Transaction).filter(Transaction.direction.in_(dirs))
+    bq = db.query(BudgetLine).filter(BudgetLine.direction.in_(dirs))
+    if year: tq=tq.filter(Transaction.year==year); bq=bq.filter(BudgetLine.year==year)
+    txs=tq.all(); bls=bq.all()
+    val=[t for t in txs if t.status=="validated"]; pend=[t for t in txs if t.status=="pending"]
+    total_b=sum(b.budget_cp for b in bls); total_e=sum(t.montant for t in val)
+    total_p=sum(t.montant for t in pend)
+    by_dir={}
+    for t in val: by_dir[t.direction]=by_dir.get(t.direction,0)+t.montant
+    by_month=[0.0]*12
+    for t in val:
+        try: m=int(t.date_reception.split("-")[1])-1; by_month[m]+=t.montant if 0<=m<=11 else 0
+        except: pass
+    bl_by_dir={}
+    for b in bls:
+        if b.direction not in bl_by_dir: bl_by_dir[b.direction]={"budget_cp":0,"engage":by_dir.get(b.direction,0)}
+        bl_by_dir[b.direction]["budget_cp"]+=b.budget_cp
+    overdrawn=[{"direction":d,"montant":v["engage"]-v["budget_cp"]} for d,v in bl_by_dir.items() if v["engage"]>v["budget_cp"]]
+    recent=[_tx_dict(t) for t in db.query(Transaction).filter(Transaction.direction.in_(dirs)).order_by(Transaction.id.desc()).limit(15 if not year else 999).filter(Transaction.year==year if year else True).limit(15).all()]
+    return {"total_budget":total_b,"total_engage":total_e,"total_pending":total_p,"total_dispo":total_b-total_e,
+            "tx_count":len(val),"pending_count":len(pend),"by_dir":by_dir,"by_month":by_month,
+            "bl_by_dir":bl_by_dir,"overdrawn":overdrawn,"recent":recent}
+
+def monthly_report(db, dirs, year, month):
+    tq=db.query(Transaction).filter(Transaction.direction.in_(dirs), Transaction.year==year)
+    if month!=0: tq=tq.filter(func.strftime("%m",Transaction.date_reception)==f"{month:02d}")
+    txs=tq.order_by(Transaction.date_reception).all()
+    bls=db.query(BudgetLine).filter(BudgetLine.direction.in_(dirs), BudgetLine.year==year).all()
+    bl_map={b.imputation:b for b in bls}
+    by_imp={}
+    for t in txs:
+        k=t.imputation or "NC"
+        if k not in by_imp: by_imp[k]={"intitule":t.intitule,"direction":t.direction,"nature":t.nature,"montant":0,"count":0}
+        by_imp[k]["montant"]+=t.montant; by_imp[k]["count"]+=1
+    rows=[{"imputation":imp,"libelle":bl_map[imp].libelle if imp in bl_map else d["intitule"],
+           "direction":d["direction"],"nature":d["nature"],
+           "budget_cp":bl_map[imp].budget_cp if imp in bl_map else 0,
+           "engage":d["montant"],"dispo":(bl_map[imp].budget_cp if imp in bl_map else 0)-d["montant"],"count":d["count"]}
+          for imp,d in sorted(by_imp.items())]
+    tb=sum(b.budget_cp for b in bls); te=sum(t.montant for t in txs if t.status=="validated")
+    return {"year":year,"month":month,"total_budget":tb,"total_engage":te,
+            "total_pending":sum(t.montant for t in txs if t.status=="pending"),
+            "total_dispo":tb-te,"rows":rows,"transactions":[_tx_dict(t) for t in txs]}
+
+# ══════════════════════════════════════════════════════════════════
+# CRUD HELPERS
+# ══════════════════════════════════════════════════════════════════
+def get_user(db, username):
+    return db.query(User).filter_by(username=username, is_active=True).first()
+
+def upsert_bl(db, year, direction, imputation, libelle, nature, budget_cp):
+    ex=db.query(BudgetLine).filter_by(year=year,direction=direction,imputation=imputation).first()
+    if ex:
+        ex.libelle=libelle or ex.libelle; ex.nature=nature; ex.budget_cp=budget_cp
+        db.commit(); return ex, False
+    bl=BudgetLine(year=year,direction=direction,imputation=imputation,libelle=libelle,nature=nature,budget_cp=budget_cp)
+    db.add(bl); db.commit(); db.refresh(bl); return bl, True
+
+def get_or_create_dept(db, code):
+    d=db.query(Department).filter_by(code=code.upper()).first()
+    if not d: d=Department(code=code.upper(),name=code.upper()); db.add(d); db.commit(); db.refresh(d)
+    return d
+
+def get_or_create_fy(db, year):
+    fy=db.query(FiscalYear).filter_by(year=year).first()
+    if not fy: fy=FiscalYear(year=year); db.add(fy); db.commit(); db.refresh(fy)
+    return fy
+
+def available_years(db, dirs):
+    from datetime import date as _date
+    cur=_date.today().year
+    ty=[r[0] for r in db.query(Transaction.year).filter(Transaction.direction.in_(dirs)).distinct().all()] if dirs else []
+    by=[r[0] for r in db.query(BudgetLine.year).filter(BudgetLine.direction.in_(dirs)).distinct().all()] if dirs else []
+    return sorted(set(ty+by+[cur,cur+1]),reverse=True)
+
+def create_tx(db, data, username, name):
+    year=int(data.get("year",date.today().year)); imp=data.get("imputation","")
+    montant=float(data.get("montant",0)); sb=budget_status(db,imp,year,montant)
+    direction=data.get("direction","X")
+    if not data.get("code_ref"):
+        n=db.query(func.count(Transaction.id)).filter_by(direction=direction,year=year).scalar() or 0
+        data["code_ref"]=f"JD{direction}-{year}-{n+1:04d}"
+    t=Transaction(
+        code_ref=data["code_ref"],date_reception=data.get("date_reception",date.today().isoformat()),
+        direction=direction,imputation=imp,nature=data.get("nature","DEPENSE COURANTE"),
+        intitule=data.get("intitule",""),description=data.get("description",""),
+        montant=montant,year=year,status=data.get("status","validated"),statut_budget=sb,
+        created_by=username,created_by_name=name,designation=data.get("designation","NC"),
+        departure_date=data.get("departure_date"),return_date=data.get("return_date"),
+        number_of_days=data.get("number_of_days"),amount_per_day=data.get("amount_per_day"),
+        num_compte=data.get("num_compte",""),num_compte_name=data.get("num_compte_name",""),
+    )
+    db.add(t); db.commit(); db.refresh(t); return t
+
+# ══════════════════════════════════════════════════════════════════
+# IMPORT HELPERS
+# ══════════════════════════════════════════════════════════════════
+def _decode_file(raw):
+    for enc in ("utf-8-sig","utf-8","latin-1","cp1252"):
+        try: return raw.decode(enc)
+        except: pass
+    raise HTTPException(400,"Cannot decode file")
+
+def _clean_amount(s):
+    s=str(s or "0").strip()
+    for ch in ("\xa0","\u202f","\u00a0"," ","\t"): s=s.replace(ch,"")
+    if s.count(",")>1: s=s.replace(",","")
+    elif s.count(",")==1:
+        p=s.split(",");
+        if len(p[1])==3: s=s.replace(",","")
+        else: s=s.replace(",",".")
+    try: return float(s) if s and s not in ("-","") else 0.0
+    except: return 0.0
+
+def _norm_date(s):
+    if not s: return date.today().isoformat()
+    s=s.strip()
+    if "/" in s:
+        p=s.split("/")
+        if len(p)==3:
+            if len(p[2])==4: return f"{p[2]}-{int(p[1]):02d}-{int(p[0]):02d}"
+            return f"{p[0]}-{int(p[1]):02d}-{int(p[2]):02d}"
+    return s
+
+def _find_header(lines):
+    for i,line in enumerate(lines):
+        up=line.upper()
+        if "DIRECTION" in up and ("DATE" in up or "MONTANT" in up or "IMPUTATION" in up): return i
+    return 0
+
+def _read_excel(raw):
+    try:
+        import openpyxl
+        wb=openpyxl.load_workbook(io.BytesIO(raw),read_only=True,data_only=True)
+        ws=wb.active; rows=[list(r) for r in ws.iter_rows(values_only=True)]; wb.close()
+    except ImportError:
+        raise HTTPException(400,"openpyxl not installed")
+    hi=0
+    for i,row in enumerate(rows):
+        if "DIRECTION" in [str(c or "").upper().strip() for c in row]: hi=i; break
+    headers=[str(c or "").strip().upper() for c in rows[hi]]
+    return headers, rows[hi+1:]
+
+def _gcol(row, headers, *keys):
+    for key in keys:
+        for i,h in enumerate(headers):
+            if key in h and i<len(row):
+                v=row[i]
+                if v is not None and str(v).strip(): return str(v).strip()
+    return ""
+
+
+# ══════════════════════════════════════════════════════════════════
+# APP BOOTSTRAP
+# ══════════════════════════════════════════════════════════════════
 def init_db():
     Base.metadata.create_all(bind=engine)
     db = next(get_db())
     try:
-        if not crud.get_user(db, ADMIN_USER):
-            crud.create_user(db, ADMIN_USER, _hash(ADMIN_PASS),
-                             "Administrateur", "admin", ALL_DIRS, "")
-            log.info("Admin user created: %s", ADMIN_USER)
-        # Seed departments
+        if not get_user(db, ADMIN_USER):
+            db.add(User(username=ADMIN_USER, password=_hash(ADMIN_PASS),
+                        full_name="Administrateur", role="admin",
+                        directions=json.dumps(ALL_DIRS)))
+            log.info("Admin created: %s", ADMIN_USER)
         for code in ALL_DIRS:
-            crud.get_or_create_department(db, code)
-        # Seed current fiscal year
-        crud.get_or_create_fiscal_year(db, date.today().year)
+            get_or_create_dept(db, code)
+        get_or_create_fy(db, date.today().year)
         db.commit()
     except Exception as e:
-        db.rollback()
-        log.error("init_db error: %s", e)
+        db.rollback(); log.error("init_db: %s", e)
     finally:
         db.close()
 
@@ -105,44 +404,38 @@ async def lifespan(app):
     init_db()
     yield
 
-# ── App ──────────────────────────────────────────────────────────
 app = FastAPI(title="CAMTEL Budget v10", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"],
                    allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Mount import router
-app.include_router(import_data.router)
-
 @app.exception_handler(Exception)
-async def _global_exc(request: Request, exc: Exception):
+async def _exc(req, exc):
     import traceback
-    log.error("SERVER ERROR: %s\n%s", exc, traceback.format_exc()[-600:])
+    log.error("ERROR: %s\n%s", exc, traceback.format_exc()[-400:])
     return JSONResponse(status_code=500, content={"error": str(exc)})
 
 # ── Auth helpers ─────────────────────────────────────────────────
-def _get_user(request: Request) -> Optional[dict]:
+def _get_user(request):
     token = request.cookies.get("session") or ""
-    auth  = request.headers.get("Authorization", "")
+    auth  = request.headers.get("Authorization","")
     if auth.startswith("Bearer "): token = auth[7:]
     if not token: return None
     try:    return serializer.loads(token)
     except BadSignature: return None
 
-def require_login(request: Request) -> dict:
+def require_login(request):
     u = _get_user(request)
     if not u: raise HTTPException(401, "Not logged in")
     return u
 
-def require_admin(request: Request) -> dict:
+def require_admin(request):
     u = require_login(request)
-    if u.get("role") not in ("admin", "dcf_dir", "dcf_sub"):
-        raise HTTPException(403, "Admin required")
+    if u.get("role") not in ("admin","dcf_dir","dcf_sub"): raise HTTPException(403,"Admin required")
     return u
 
-def user_dirs(u: dict) -> list:
-    if u.get("role") in ("admin", "dcf_dir", "dcf_sub", "agent_plus"):
-        return ALL_DIRS
-    try:    return json.loads(u.get("dirs") or u.get("directions", "[]"))
+def user_dirs(u):
+    if u.get("role") in ("admin","dcf_dir","dcf_sub","agent_plus"): return ALL_DIRS
+    try:    return json.loads(u.get("dirs") or u.get("directions","[]"))
     except: return []
 
 # ── Pages ─────────────────────────────────────────────────────────
@@ -150,274 +443,379 @@ def user_dirs(u: dict) -> list:
 def home(): return HTMLResponse(APP_HTML)
 
 @app.get("/login", response_class=HTMLResponse)
-def login_page():
-    return HTMLResponse(LOGIN_HTML.replace("__ERR__", "<div id=\'__ERR__\'></div>"))
+def login_page(): return HTMLResponse(LOGIN_HTML)
 
-# ── Auth API ──────────────────────────────────────────────────────
+# ── Auth ──────────────────────────────────────────────────────────
 @app.post("/api/login")
-def do_login(username: str = Form(...), password: str = Form(...),
-             db: Session = Depends(get_db)):
-    u = crud.get_user(db, username)
+def do_login(username: str=Form(...), password: str=Form(...), db: Session=Depends(get_db)):
+    u = get_user(db, username)
     if not u or u.password != _hash(password):
-        return HTMLResponse(LOGIN_HTML.replace("__ERR__",
-            "<div class=\'err\'>❌ Identifiants incorrects.</div>"), status_code=401)
-    token = serializer.dumps({"u": u.username, "role": u.role,
-                               "name": u.full_name, "dirs": u.directions})
+        return HTMLResponse(LOGIN_HTML, status_code=401)
+    token = serializer.dumps({"u":u.username,"role":u.role,"name":u.full_name,"dirs":u.directions})
     r = RedirectResponse("/", status_code=302)
     r.set_cookie("session", token, httponly=True, samesite="lax")
     return r
 
 @app.post("/api/login/token")
-def api_login(payload: dict, db: Session = Depends(get_db)):
-    u = crud.get_user(db, payload.get("username", ""))
-    if not u or u.password != _hash(payload.get("password", "")):
-        raise HTTPException(401, "Invalid credentials")
-    token = serializer.dumps({"u": u.username, "role": u.role,
-                               "name": u.full_name, "dirs": u.directions})
-    return {"token": token, "role": u.role, "name": u.full_name}
+def api_login(payload: dict, db: Session=Depends(get_db)):
+    u = get_user(db, payload.get("username",""))
+    if not u or u.password != _hash(payload.get("password","")):
+        raise HTTPException(401,"Invalid credentials")
+    token = serializer.dumps({"u":u.username,"role":u.role,"name":u.full_name,"dirs":u.directions})
+    return {"token":token,"role":u.role,"name":u.full_name}
 
 @app.post("/api/logout")
 def logout(response: Response):
-    response.delete_cookie("session")
-    return {"ok": True}
+    response.delete_cookie("session"); return {"ok":True}
 
 @app.get("/api/me")
-def api_me(request: Request, db: Session = Depends(get_db)):
+def api_me(request: Request, db: Session=Depends(get_db)):
     u = require_login(request)
     dirs = user_dirs(u)
-    years = crud.get_available_years(db, dirs)
-    default_year = years[0] if years else date.today().year
-    return {**u, "direction_list": dirs, "available_years": years, "default_year": default_year}
+    years = available_years(db, dirs)
+    default = years[0] if years else date.today().year
+    return {**u, "direction_list":dirs, "available_years":years, "default_year":default}
 
 # ── Dashboard ─────────────────────────────────────────────────────
 @app.get("/api/dashboard")
-def api_dashboard(request: Request, year: int = 0, db: Session = Depends(get_db)):
+def api_dashboard(request: Request, year: int=0, db: Session=Depends(get_db)):
     u = require_login(request)
-    return get_dashboard_data(db, user_dirs(u), year)
+    return dashboard_data(db, user_dirs(u), year)
 
 # ── Transactions ──────────────────────────────────────────────────
-@app.get("/api/transactions")
-def list_tx(request: Request, year: int = 0, direction: str = "",
-            status: str = "", q: str = "", db: Session = Depends(get_db)):
-    u = require_login(request)
-    rows = crud.get_transactions(db, user_dirs(u), year, direction, status, q)
-    return [_tx_dict(t) for t in rows]
-
 @app.get("/api/transactions/search")
-def search_tx(request: Request, q: str = "", direction: str = "",
-              year: int = 0, db: Session = Depends(get_db)):
+def search_tx(request: Request, q: str="", direction: str="", year: int=0, db: Session=Depends(get_db)):
     u = require_login(request)
     dirs = user_dirs(u)
-    rows = crud.get_transactions(db, dirs, year, direction, "", q)
+    qry = db.query(Transaction).filter(Transaction.direction.in_(dirs))
+    if year: qry=qry.filter(Transaction.year==year)
+    if direction and direction in dirs: qry=qry.filter(Transaction.direction==direction)
+    if q: qry=qry.filter(or_(Transaction.code_ref.ilike(f"%{q}%"),Transaction.intitule.ilike(f"%{q}%"),
+                              Transaction.imputation.ilike(f"%{q}%"),Transaction.direction.ilike(f"%{q}%")))
+    rows = qry.order_by(Transaction.date_reception.desc(),Transaction.id.desc()).limit(500).all()
     result = []
     for t in rows:
         d = _tx_dict(t)
-        bl = db.query(models.BudgetLine).filter_by(imputation=t.imputation, year=t.year).first()
-        d["budget_cp"]  = bl.budget_cp if bl else 0
-        d["bl_libelle"] = bl.libelle   if bl else ""
+        bl = db.query(BudgetLine).filter_by(imputation=t.imputation, year=t.year).first()
+        d["budget_cp"] = bl.budget_cp if bl else 0
+        d["bl_libelle"]= bl.libelle   if bl else ""
         result.append(d)
     return result
 
 @app.get("/api/transactions/{tx_id}")
-def get_tx(request: Request, tx_id: int, db: Session = Depends(get_db)):
+def get_tx(request: Request, tx_id: int, db: Session=Depends(get_db)):
     require_login(request)
-    t = db.get(models.Transaction, tx_id)
+    t = db.get(Transaction, tx_id)
     if not t: raise HTTPException(404)
     return _tx_dict(t)
 
-@app.post("/api/transactions")
-def create_tx(request: Request, payload: dict, db: Session = Depends(get_db)):
+@app.get("/api/transactions")
+def list_tx(request: Request, year: int=0, direction: str="", status: str="", q: str="", db: Session=Depends(get_db)):
     u = require_login(request)
-    t = crud.create_transaction(db, payload, u.get("u",""), u.get("name",""))
+    dirs = user_dirs(u)
+    qry = db.query(Transaction).filter(Transaction.direction.in_(dirs))
+    if year: qry=qry.filter(Transaction.year==year)
+    if direction and direction in dirs: qry=qry.filter(Transaction.direction==direction)
+    if status: qry=qry.filter(Transaction.status==status)
+    if q: qry=qry.filter(or_(Transaction.code_ref.ilike(f"%{q}%"),Transaction.intitule.ilike(f"%{q}%"),Transaction.imputation.ilike(f"%{q}%")))
+    return [_tx_dict(t) for t in qry.order_by(Transaction.date_reception.desc()).limit(500).all()]
+
+@app.post("/api/transactions")
+def create_tx_route(request: Request, payload: dict, db: Session=Depends(get_db)):
+    u = require_login(request)
+    t = create_tx(db, payload, u.get("u",""), u.get("name",""))
     return _tx_dict(t)
 
 @app.put("/api/transactions/{tx_id}")
-def update_tx(request: Request, tx_id: int, payload: dict, db: Session = Depends(get_db)):
+def update_tx(request: Request, tx_id: int, payload: dict, db: Session=Depends(get_db)):
     require_login(request)
-    t = db.get(models.Transaction, tx_id)
+    t = db.get(Transaction, tx_id)
     if not t: raise HTTPException(404)
-    return _tx_dict(crud.update_transaction(db, t, payload))
+    for k,v in payload.items():
+        if hasattr(t,k): setattr(t,k,v)
+    t.statut_budget = budget_status(db, t.imputation, t.year)
+    db.commit(); db.refresh(t); return _tx_dict(t)
 
 @app.delete("/api/transactions/{tx_id}")
-def delete_tx(request: Request, tx_id: int, db: Session = Depends(get_db)):
+def delete_tx(request: Request, tx_id: int, db: Session=Depends(get_db)):
     require_login(request)
-    crud.delete_transaction(db, tx_id)
-    return {"ok": True}
+    t = db.get(Transaction, tx_id)
+    if t: db.delete(t); db.commit()
+    return {"ok":True}
 
 @app.post("/api/transactions/validate-batch")
-def validate_batch(request: Request, payload: dict, db: Session = Depends(get_db)):
+def validate_batch(request: Request, payload: dict, db: Session=Depends(get_db)):
     require_login(request)
-    count = crud.validate_transactions(db, payload.get("ids", []))
-    return {"validated": count}
+    count=0
+    for tid in payload.get("ids",[]):
+        t=db.get(Transaction,int(tid))
+        if t: t.status="validated"; count+=1
+    db.commit(); return {"validated":count}
 
 @app.post("/api/transactions/{tx_id}/attachments")
-async def add_attachment(request: Request, tx_id: int,
-                         file: UploadFile = File(...), db: Session = Depends(get_db)):
+async def add_attachment(request: Request, tx_id: int, file: UploadFile=File(...), db: Session=Depends(get_db)):
     u = require_login(request)
-    import base64
-    t = db.get(models.Transaction, tx_id)
+    t = db.get(Transaction, tx_id)
     if not t: raise HTTPException(404)
-    data = base64.b64encode(await file.read()).decode()
-    att = models.Attachment(
-        transaction_id=tx_id, filename=file.filename or "file",
-        content_type=file.content_type or "application/octet-stream",
-        data=data, uploaded_by=u.get("u","")
-    )
-    db.add(att); db.commit()
-    # Update JSON list on transaction
+    raw = await file.read()
+    data = _b64.b64encode(raw).decode()
     atts = json.loads(t.attachments or "[]")
-    atts.append({"id": att.id, "name": att.filename, "type": att.content_type})
-    t.attachments = json.dumps(atts); db.commit()
-    return {"id": att.id, "name": att.filename}
+    att_id = len(atts)
+    atts.append({"id":att_id,"name":file.filename,"type":file.content_type,"data":data[:50]+"..."})
+    # Store full data in description field of a new tx-attachment record
+    # For now store in JSON blob (attachments field stores index + data)
+    import hashlib as _hl
+    full_atts = json.loads(t.attachments or "[]")
+    full_atts.append({"id":att_id,"name":file.filename,"type":file.content_type or "application/octet-stream","data":data})
+    t.attachments = json.dumps(full_atts)
+    db.commit()
+    return {"id":att_id,"name":file.filename,"ok":True}
+
+@app.get("/api/transactions/{tx_id}/attachments")
+def list_attachments(request: Request, tx_id: int, db: Session=Depends(get_db)):
+    require_login(request)
+    t = db.get(Transaction, tx_id)
+    if not t: raise HTTPException(404)
+    atts = json.loads(t.attachments or "[]")
+    return [{"id":a.get("id",i),"name":a["name"],"type":a.get("type","")} for i,a in enumerate(atts)]
 
 @app.get("/api/transactions/{tx_id}/attachments/{att_idx}/download")
-def download_attachment(request: Request, tx_id: int, att_idx: int,
-                        db: Session = Depends(get_db)):
+def download_attachment(request: Request, tx_id: int, att_idx: int, db: Session=Depends(get_db)):
     require_login(request)
-    import base64
-    att = db.get(models.Attachment, att_idx)
-    if not att or att.transaction_id != tx_id: raise HTTPException(404)
-    raw = base64.b64decode(att.data)
-    return StreamingResponse(iter([raw]), media_type=att.content_type,
-        headers={"Content-Disposition": f"attachment; filename={att.filename}"})
+    t = db.get(Transaction, tx_id)
+    if not t: raise HTTPException(404)
+    atts = json.loads(t.attachments or "[]")
+    att = next((a for a in atts if a.get("id")==att_idx), None)
+    if not att: raise HTTPException(404)
+    raw = _b64.b64decode(att["data"])
+    return StreamingResponse(iter([raw]), media_type=att.get("type","application/octet-stream"),
+        headers={"Content-Disposition":f"attachment; filename={att['name']}"})
 
 # ── Budget Lines ──────────────────────────────────────────────────
 @app.get("/api/budget-lines")
-def list_bl(request: Request, year: int = 0, direction: str = "",
-            q: str = "", db: Session = Depends(get_db)):
+def list_bl(request: Request, year: int=0, direction: str="", q: str="", db: Session=Depends(get_db)):
     u = require_login(request)
-    return crud.get_budget_lines(db, user_dirs(u), year, direction, q)
+    dirs = user_dirs(u)
+    qry = db.query(BudgetLine).filter(BudgetLine.direction.in_(dirs))
+    if year: qry=qry.filter(BudgetLine.year==year)
+    if direction and direction in dirs: qry=qry.filter(BudgetLine.direction==direction)
+    if q: qry=qry.filter(or_(BudgetLine.imputation.ilike(f"%{q}%"),BudgetLine.libelle.ilike(f"%{q}%")))
+    bls = qry.order_by(BudgetLine.direction,BudgetLine.imputation).all()
+    result=[]
+    for b in bls:
+        eng=db.query(func.coalesce(func.sum(Transaction.montant),0)).filter(
+            Transaction.imputation==b.imputation,Transaction.year==b.year,
+            Transaction.status=="validated").scalar() or 0.0
+        result.append({"id":b.id,"year":b.year,"direction":b.direction,"imputation":b.imputation,
+                        "libelle":b.libelle,"nature":b.nature,"budget_cp":b.budget_cp,
+                        "engaged":eng,"available":b.budget_cp-eng,
+                        "pct":round(eng/b.budget_cp*100,1) if b.budget_cp else 0})
+    return result
 
 @app.post("/api/budget-lines")
-def create_bl(request: Request, payload: dict, db: Session = Depends(get_db)):
+def create_bl(request: Request, payload: dict, db: Session=Depends(get_db)):
     require_admin(request)
-    bl, created = crud.upsert_budget_line(
-        db, payload["year"], payload["direction"], payload["imputation"],
-        payload.get("libelle",""), payload.get("nature","DEPENSE COURANTE"),
-        payload.get("budget_cp",0.0)
-    )
-    return {"id": bl.id, "created": created}
+    bl,created = upsert_bl(db,payload["year"],payload["direction"],payload["imputation"],
+                            payload.get("libelle",""),payload.get("nature","DEPENSE COURANTE"),
+                            payload.get("budget_cp",0.0))
+    return {"id":bl.id,"created":created}
 
 @app.put("/api/budget-lines/{bl_id}")
-def update_bl(request: Request, bl_id: int, payload: dict, db: Session = Depends(get_db)):
+def update_bl(request: Request, bl_id: int, payload: dict, db: Session=Depends(get_db)):
     require_admin(request)
-    bl = db.get(models.BudgetLine, bl_id)
+    bl=db.get(BudgetLine,bl_id)
     if not bl: raise HTTPException(404)
-    for k, v in payload.items():
-        if hasattr(bl, k): setattr(bl, k, v)
-    db.commit()
-    return {"ok": True}
+    for k,v in payload.items():
+        if hasattr(bl,k): setattr(bl,k,v)
+    db.commit(); return {"ok":True}
 
 @app.delete("/api/budget-lines/{bl_id}")
-def delete_bl(request: Request, bl_id: int, db: Session = Depends(get_db)):
+def delete_bl(request: Request, bl_id: int, db: Session=Depends(get_db)):
     require_admin(request)
-    bl = db.get(models.BudgetLine, bl_id)
+    bl=db.get(BudgetLine,bl_id)
     if bl: db.delete(bl); db.commit()
-    return {"ok": True}
+    return {"ok":True}
+
+# ── IMPORT ENDPOINTS ──────────────────────────────────────────────
+@app.post("/api/import/transactions")
+async def import_tx(request: Request, file: UploadFile=File(...), year: int=Form(...), db: Session=Depends(get_db)):
+    u = require_login(request)
+    if u.get("role") not in ("admin","dcf_dir","dcf_sub","agent_plus"):
+        raise HTTPException(403,"Accès non autorisé")
+    raw=await file.read(); fname=(file.filename or "").lower()
+    created=0; errors=[]
+    try:
+        if fname.endswith((".xlsx",".xls")):
+            headers,data_rows=_read_excel(raw)
+            for ri,row in enumerate(data_rows,2):
+                try:
+                    direction=_gcol(row,headers,"DIRECTION").upper()
+                    if not direction or direction in ("DIRECTION","TOTAL","SOUS-TOTAL",""): continue
+                    montant=_clean_amount(_gcol(row,headers,"MONTANT","AMOUNT"))
+                    date_r=_norm_date(_gcol(row,headers,"DATE ENGAGEMENT","DATE DE RECEPTION","DATE"))
+                    intitule=_gcol(row,headers,"INTITULE DE LA COMMANDE","LIBELLE","INTITULE","ORDER TITLE")
+                    imputation=_gcol(row,headers,"IMPUTATION COMPTABLE","IMPUTATION","ACCOUNTING")
+                    nature_raw=_gcol(row,headers,"NATURE DE LA DEPENSE","NATURE")
+                    nature="DEPENSE DE CAPITAL" if "CAPITAL" in nature_raw.upper() else "DEPENSE COURANTE"
+                    code_ref=_gcol(row,headers,"CODE /REF","CODE_REF","REF") or f"IMP-{direction}-{year}-{ri:04d}"
+                    sb=budget_status(db,imputation,year,montant)
+                    db.add(Transaction(code_ref=code_ref,date_reception=date_r,direction=direction,
+                        imputation=imputation,nature=nature,intitule=intitule,montant=montant,year=year,
+                        status="validated",statut_budget=sb,created_by=u.get("u",""),created_by_name=u.get("name","IMPORT")))
+                    created+=1
+                except Exception as e: errors.append(f"Row {ri}: {e}")
+        else:
+            txt=_decode_file(raw).lstrip("\ufeff"); lines=txt.splitlines()
+            hi=_find_header(lines); reader=csv.DictReader(io.StringIO("\n".join(lines[hi:])))
+            for ri,row in enumerate(reader,hi+2):
+                try:
+                    nr={(k or "").strip().upper():(v or "").strip() for k,v in row.items() if k}
+                    direction=nr.get("DIRECTION","").upper()
+                    if not direction or direction in ("DIRECTION","TOTAL","SOUS-TOTAL","SITUATION"): continue
+                    montant=_clean_amount(nr.get(" MONTANT  ") or nr.get("MONTANT") or nr.get("AMOUNT") or "0")
+                    date_r=_norm_date(nr.get("DATE ENGAGEMENT") or nr.get("DATE DE RECEPTION") or nr.get("DATE") or "")
+                    intitule=nr.get("INTITULE DE LA COMMANDE") or nr.get("LIBELLE") or nr.get("ORDER TITLE") or nr.get("INTITULE") or ""
+                    imputation=nr.get("IMPUTATION COMPTABLE") or nr.get("IMPUTATION") or nr.get("ACCOUNTING ENTRY") or ""
+                    nature_raw=nr.get("NATURE DE LA DEPENSE (DEPENSE COURANTE, DEPENSE DE CAPITAL)") or nr.get("NATURE DE LA DEPENSE") or nr.get("NATURE") or ""
+                    nature="DEPENSE DE CAPITAL" if "CAPITAL" in nature_raw.upper() else "DEPENSE COURANTE"
+                    code_ref=nr.get("CODE /REF NUMBER") or nr.get("CODE_REF") or f"IMP-{direction}-{year}-{ri:04d}"
+                    sb=budget_status(db,imputation,year,montant)
+                    db.add(Transaction(code_ref=code_ref,date_reception=date_r,direction=direction,
+                        imputation=imputation,nature=nature,intitule=intitule,montant=montant,year=year,
+                        status="validated",statut_budget=sb,created_by=u.get("u",""),created_by_name=u.get("name","IMPORT")))
+                    created+=1
+                except Exception as e: errors.append(f"Row {ri}: {e}")
+        db.commit()
+    except HTTPException: raise
+    except Exception as e: db.rollback(); raise HTTPException(500,f"Import rolled back: {e}")
+    return {"created":created,"errors":errors[:20]}
+
+@app.post("/api/import/budget-lines")
+async def import_bl(request: Request, file: UploadFile=File(...), year: int=Form(0), db: Session=Depends(get_db)):
+    u = require_login(request)
+    if u.get("role") not in ("admin","dcf_dir","dcf_sub"):
+        raise HTTPException(403,"Admin/DCF only")
+    raw=await file.read(); fname=(file.filename or "").lower()
+    created=updated=skipped=0; errors=[]
+    try:
+        if fname.endswith((".xlsx",".xls")):
+            headers,data_rows=_read_excel(raw)
+            for ri,row in enumerate(data_rows,2):
+                try:
+                    yr_raw=_gcol(row,headers,"YEAR","ANNEE","ANNÉE") or (str(year) if year else "")
+                    dirn=_gcol(row,headers,"DIRECTION").upper()
+                    imp=_gcol(row,headers,"IMPUTATION COMPTABLE","IMPUTATION","ACCOUNTING")
+                    lib=_gcol(row,headers,"LIBELLE","DESCRIPTION","LABEL")
+                    nat=_gcol(row,headers,"NATURE") or "DEPENSE COURANTE"
+                    bcp_raw=_gcol(row,headers,"BUDGET CP","BUDGET_CP","APPROVED","MONTANT")
+                    if not yr_raw or not dirn or not imp: skipped+=1; continue
+                    _,wc=upsert_bl(db,int(float(yr_raw)),dirn,imp,lib,nat,_clean_amount(bcp_raw))
+                    if wc: created+=1
+                    else: updated+=1
+                except Exception as e: errors.append(f"Row {ri}: {e}")
+        else:
+            txt=_decode_file(raw).lstrip("\ufeff"); reader=csv.DictReader(io.StringIO(txt))
+            for ri,row in enumerate(reader,2):
+                try:
+                    yr_raw=(row.get("YEAR") or row.get("ANNEE") or row.get("year") or "").strip()
+                    if not yr_raw and year: yr_raw=str(year)
+                    dirn=(row.get("DIRECTION") or row.get("direction") or "").strip().upper()
+                    imp=(row.get("IMPUTATION COMPTABLE") or row.get("IMPUTATION") or row.get("imputation") or row.get("ACCOUNTING ENTRY") or "").strip()
+                    lib=(row.get("LIBELLE") or row.get("libelle") or row.get("DESCRIPTION") or "").strip()
+                    nat=(row.get("NATURE") or row.get("nature") or "DEPENSE COURANTE").strip()
+                    bcp_raw=str(row.get("BUDGET CP (FCFA)") or row.get("BUDGET CP") or row.get("budget_cp") or "0").strip()
+                    if not yr_raw or not dirn or not imp: skipped+=1; continue
+                    _,wc=upsert_bl(db,int(float(yr_raw)),dirn,imp,lib,nat,_clean_amount(bcp_raw))
+                    if wc: created+=1
+                    else: updated+=1
+                except Exception as e: errors.append(f"Row {ri}: {e}")
+        db.commit()
+    except HTTPException: raise
+    except Exception as e: db.rollback(); raise HTTPException(500,f"Import rolled back: {e}")
+    return {"created":created,"updated":updated,"skipped":skipped,"errors":errors[:20]}
 
 # ── Export ────────────────────────────────────────────────────────
 @app.get("/api/export/transactions")
-def export_tx(request: Request, year: int = 0, direction: str = "",
-              db: Session = Depends(get_db)):
+def export_tx(request: Request, year: int=0, direction: str="", db: Session=Depends(get_db)):
     u = require_login(request)
-    rows = crud.get_transactions(db, user_dirs(u), year, direction)
-    out = io.StringIO()
-    w = csv.writer(out)
-    w.writerow(["CODE REF","DATE","DIRECTION","IMPUTATION","NATURE",
-                "INTITULE","MONTANT","ANNEE","STATUT","STATUT BUDGET"])
-    for t in rows:
-        w.writerow([t.code_ref, t.date_reception, t.direction, t.imputation,
-                    t.nature, t.intitule, t.montant, t.year, t.status, t.statut_budget])
-    fname = f"transactions_{year or 'all'}_{direction or 'all'}.csv"
-    return StreamingResponse(iter([out.getvalue()]), media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={fname}"})
+    dirs = user_dirs(u)
+    qry = db.query(Transaction).filter(Transaction.direction.in_(dirs))
+    if year: qry=qry.filter(Transaction.year==year)
+    if direction and direction in dirs: qry=qry.filter(Transaction.direction==direction)
+    rows = qry.order_by(Transaction.date_reception.desc()).all()
+    out=io.StringIO(); w=csv.writer(out)
+    w.writerow(["CODE REF","DATE","DIRECTION","IMPUTATION","NATURE","INTITULE","MONTANT","ANNEE","STATUT","STATUT BUDGET"])
+    for t in rows: w.writerow([t.code_ref,t.date_reception,t.direction,t.imputation,t.nature,t.intitule,t.montant,t.year,t.status,t.statut_budget])
+    fname=f"transactions_{year or 'all'}_{direction or 'all'}.csv"
+    return StreamingResponse(iter([out.getvalue()]),media_type="text/csv",headers={"Content-Disposition":f"attachment; filename={fname}"})
 
 @app.get("/api/export/template-transactions")
 def tpl_tx():
-    out = io.StringIO()
-    w = csv.writer(out)
-    w.writerow(["DATE ENGAGEMENT","DIRECTION","IMPUTATION COMPTABLE",
-                "NATURE DE LA DEPENSE","INTITULE DE LA COMMANDE","MONTANT","CODE /REF NUMBER"])
+    out=io.StringIO(); w=csv.writer(out)
+    w.writerow(["DATE ENGAGEMENT","DIRECTION","IMPUTATION COMPTABLE","NATURE DE LA DEPENSE","INTITULE DE LA COMMANDE","MONTANT","CODE /REF NUMBER"])
     w.writerow(["15/03/2025","DCF","604100","DEPENSE COURANTE","ACHAT FOURNITURES","250000","DCF-001"])
     w.writerow(["20/07/2025","DRH","622100","DEPENSE COURANTE","ENTRETIEN VEHICULE","180000","DRH-001"])
-    return StreamingResponse(iter([out.getvalue()]), media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=template_transactions.csv"})
+    return StreamingResponse(iter([out.getvalue()]),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=template_transactions.csv"})
 
 @app.get("/api/export/template-budget-lines")
 def tpl_bl():
-    out = io.StringIO()
-    w = csv.writer(out)
+    out=io.StringIO(); w=csv.writer(out)
     w.writerow(["YEAR","DIRECTION","IMPUTATION COMPTABLE","LIBELLE","NATURE","BUDGET CP (FCFA)"])
     w.writerow(["2025","DCF","604100","FOURNITURES DE BUREAU","DEPENSE COURANTE","5000000"])
     w.writerow(["2025","DRH","622100","ENTRETIEN ET REPARATIONS","DEPENSE COURANTE","8000000"])
-    return StreamingResponse(iter([out.getvalue()]), media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=template_budget_lines.csv"})
+    return StreamingResponse(iter([out.getvalue()]),media_type="text/csv",headers={"Content-Disposition":"attachment; filename=template_budget_lines.csv"})
 
 # ── Reports ───────────────────────────────────────────────────────
 @app.get("/api/report/monthly")
-def api_report(request: Request, year: int, month: int, db: Session = Depends(get_db)):
+def api_report(request: Request, year: int, month: int, db: Session=Depends(get_db)):
     u = require_login(request)
-    dirs = user_dirs(u)
-    data = get_monthly_report(db, dirs, year, month)
-    MOIS = ["Janvier","Février","Mars","Avril","Mai","Juin","Juillet",
-            "Août","Septembre","Octobre","Novembre","Décembre"]
-    fname = (f"rapport_annuel_{year}.csv" if month == 0
-             else f"rapport_{year}_{month:02d}.csv")
-    title = (f"RAPPORT ANNUEL CAMTEL — {year}" if month == 0
-             else f"RAPPORT MENSUEL CAMTEL — {MOIS[month-1].upper()} {year}")
-    out = io.StringIO()
-    w = csv.writer(out)
-    w.writerow([title])
-    w.writerow(["DIRECTION","IMPUTATION","LIBELLE","NATURE",
-                "BUDGET CP","ENGAGE","DISPONIBLE","NB TX"])
-    for row in data["rows"]:
-        w.writerow([row["direction"], row["imputation"], row["libelle"],
-                    row["nature"], row["budget_cp"], row["engage"],
-                    row["dispo"], row["count"]])
-    w.writerow([])
-    w.writerow(["TOTAL BUDGET", data["total_budget"],
-                "TOTAL ENGAGE", data["total_engage"],
-                "DISPONIBLE", data["total_dispo"]])
-    return StreamingResponse(iter([out.getvalue()]), media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={fname}"})
+    data = monthly_report(db, user_dirs(u), year, month)
+    MOIS=["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"]
+    fname=f"rapport_annuel_{year}.csv" if month==0 else f"rapport_{year}_{month:02d}.csv"
+    title=f"RAPPORT ANNUEL CAMTEL — {year}" if month==0 else f"RAPPORT MENSUEL CAMTEL — {MOIS[month-1].upper()} {year}"
+    out=io.StringIO(); w=csv.writer(out)
+    w.writerow([title]); w.writerow(["DIRECTION","IMPUTATION","LIBELLE","NATURE","BUDGET CP","ENGAGE","DISPONIBLE","NB TX"])
+    for row in data["rows"]: w.writerow([row["direction"],row["imputation"],row["libelle"],row["nature"],row["budget_cp"],row["engage"],row["dispo"],row["count"]])
+    w.writerow([]); w.writerow(["TOTAL BUDGET",data["total_budget"],"TOTAL ENGAGE",data["total_engage"],"DISPONIBLE",data["total_dispo"]])
+    return StreamingResponse(iter([out.getvalue()]),media_type="text/csv",headers={"Content-Disposition":f"attachment; filename={fname}"})
 
 # ── Users ─────────────────────────────────────────────────────────
 @app.get("/api/users")
-def list_users(request: Request, db: Session = Depends(get_db)):
+def list_users(request: Request, db: Session=Depends(get_db)):
     require_admin(request)
-    return [{"id":u.id,"username":u.username,"full_name":u.full_name,
-             "role":u.role,"directions":u.directions,"email":u.email}
-            for u in crud.get_users(db)]
+    return [{"id":u.id,"username":u.username,"full_name":u.full_name,"role":u.role,
+             "directions":u.directions,"email":u.email}
+            for u in db.query(User).filter_by(is_active=True).all()]
 
 @app.post("/api/users")
-def create_user(request: Request, payload: dict, db: Session = Depends(get_db)):
+def create_user_route(request: Request, payload: dict, db: Session=Depends(get_db)):
     require_admin(request)
     try:
-        u = crud.create_user(db, payload["username"], _hash(payload.get("password","changeme")),
-                             payload.get("full_name",""), payload.get("role","agent"),
-                             payload.get("directions",[]), payload.get("email",""))
-        return {"id": u.id, "ok": True}
-    except Exception:
-        db.rollback()
-        raise HTTPException(400, "Username already exists")
+        u=User(username=payload["username"],password=_hash(payload.get("password","changeme")),
+               full_name=payload.get("full_name",""),role=payload.get("role","agent"),
+               directions=json.dumps(payload.get("directions",[])),email=payload.get("email",""))
+        db.add(u); db.commit(); return {"id":u.id,"ok":True}
+    except Exception: db.rollback(); raise HTTPException(400,"Username exists")
 
 @app.put("/api/users/{uid}")
-def update_user(request: Request, uid: int, payload: dict, db: Session = Depends(get_db)):
+def update_user_route(request: Request, uid: int, payload: dict, db: Session=Depends(get_db)):
     require_admin(request)
-    u = db.get(models.User, uid)
+    u=db.get(User,uid)
     if not u: raise HTTPException(404)
-    if "password" in payload and payload["password"]:
-        payload["password"] = _hash(payload["password"])
-    if "directions" in payload and isinstance(payload["directions"], list):
-        payload["directions"] = json.dumps(payload["directions"])
-    crud.update_user(db, u, **payload)
-    return {"ok": True}
+    if payload.get("password"): u.password=_hash(payload["password"])
+    for k in ("full_name","role","email"):
+        if k in payload: setattr(u,k,payload[k])
+    if "directions" in payload:
+        u.directions=json.dumps(payload["directions"]) if isinstance(payload["directions"],list) else payload["directions"]
+    db.commit(); return {"ok":True}
 
 @app.delete("/api/users/{uid}")
-def delete_user(request: Request, uid: int, db: Session = Depends(get_db)):
+def delete_user_route(request: Request, uid: int, db: Session=Depends(get_db)):
     require_admin(request)
-    crud.deactivate_user(db, uid)
-    return {"ok": True}
+    u=db.get(User,uid)
+    if u: u.is_active=False; db.commit()
+    return {"ok":True}
+
 
 # ── Plan Comptable & PTA Planning ─────────────────────────────────
 @app.get("/api/plan-comptable")
@@ -1012,18 +1410,13 @@ def _fiche_block(t, db):
 
 # ── Version / Health ──────────────────────────────────────────────
 @app.get("/version")
-def version(db: Session = Depends(get_db)):
+def version(db: Session=Depends(get_db)):
     try:
-        stats = {
-            "users":        db.query(func.count(models.User.id)).scalar(),
-            "transactions": db.query(func.count(models.Transaction.id)).scalar(),
-            "budget_lines": db.query(func.count(models.BudgetLine.id)).scalar(),
-            "departments":  db.query(func.count(models.Department.id)).scalar(),
-            "fiscal_years": db.query(func.count(models.FiscalYear.id)).scalar(),
-        }
-    except Exception as e:
-        stats = {"error": str(e)}
-    return {"version": "v10-sqlalchemy-2026-02-28", "status": "ok", "db": stats}
+        stats={"users":db.query(func.count(User.id)).scalar(),
+               "transactions":db.query(func.count(Transaction.id)).scalar(),
+               "budget_lines":db.query(func.count(BudgetLine.id)).scalar()}
+    except Exception as e: stats={"error":str(e)}
+    return {"version":"v10-single-file-sqlalchemy","status":"ok","db":stats}
 
 
 LOGIN_HTML = '<!doctype html>\n<html lang=\'fr\' id=\'lpage\'><head><meta charset=\'utf-8\'/>\n<meta name=\'viewport\' content=\'width=device-width,initial-scale=1\'/>\n<title>CAMTEL - Connexion / Login</title>\n<style>\n*{box-sizing:border-box;margin:0;padding:0;}\nbody{font-family:\'Segoe UI\',system-ui,sans-serif;background:linear-gradient(135deg,#0a1f4e 0%,#1f4d8f 55%,#00b0e8 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;}\n.card{background:#fff;border-radius:16px;padding:32px 30px;width:440px;box-shadow:0 20px 60px rgba(0,0,0,.3);}\n.lrow{display:flex;align-items:center;gap:14px;margin-bottom:20px;}\n.llogo{width:64px;height:64px;object-fit:contain;flex-shrink:0;}\nh2{font-size:17px;font-weight:800;color:#0f2a5e;}\n.sub{font-size:10px;color:#64748b;margin-top:2px;}\n.lang-row{display:flex;gap:6px;justify-content:flex-end;margin-bottom:14px;}\n.lang-btn{padding:4px 12px;border-radius:20px;border:1.5px solid #e2e8f0;background:#f8fafc;cursor:pointer;font-size:11px;font-weight:700;color:#475569;}\n.lang-btn.active{background:#1f4d8f;color:#fff;border-color:#1f4d8f;}\nlabel{display:block;font-size:11px;font-weight:700;color:#475569;margin:12px 0 4px;text-transform:uppercase;letter-spacing:.04em;}\ninput[type=text],input[type=password]{width:100%;padding:11px 12px;border-radius:8px;border:1.5px solid #e2e8f0;font-size:14px;font-family:inherit;}\ninput:focus{outline:none;border-color:#00b0e8;box-shadow:0 0 0 3px rgba(0,176,232,.12);}\n.submit-btn{width:100%;padding:12px;border-radius:8px;background:linear-gradient(135deg,#1f4d8f,#00b0e8);color:#fff;border:none;cursor:pointer;font-size:14px;font-weight:700;margin-top:18px;}\n.submit-btn:hover{opacity:.92;}\n.hint{color:#94a3b8;font-size:11px;margin-top:12px;text-align:center;}\n.err{background:#fee2e2;color:#dc2626;padding:9px 12px;border-radius:6px;font-size:12px;margin-bottom:10px;border-left:3px solid #dc2626;}\n.divider{border:none;border-top:1px solid #f1f5f9;margin:16px 0;}\n</style></head>\n<body><div class=\'card\'>\n  <div class=\'lang-row\'>\n    <button class=\'lang-btn active\' id=\'lb-fr\' onclick="setLang(\'fr\')">🇫🇷 Français</button>\n    <button class=\'lang-btn\' id=\'lb-en\' onclick="setLang(\'en\')">🇬🇧 English</button>\n  </div>\n  <div class=\'lrow\'>\n    <img src=\'data:image/png;base64,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\' class=\'llogo\' alt=\'CAMTEL\'/>\n    <div>\n      <h2>CAMTEL</h2>\n      <div class=\'sub\' id=\'l-sub\'>Gestion Budgétaire — SAAF / DCF / Contrôle Budgétaire</div>\n    </div>\n  </div>\n  <div id="__ERR__"></div>\n  <form id=\'lform\' onsubmit=\'doLogin(event)\'>\n    <label id=\'l-user\'>IDENTIFIANT</label>\n    <input name=\'username\' id=\'inp-user\' placeholder=\'admin\' required autofocus autocomplete=\'username\'/>\n    <label id=\'l-pass\'>MOT DE PASSE</label>\n    <input name=\'password\' type=\'password\' id=\'inp-pass\' placeholder=\'••••••••\' required autocomplete=\'current-password\'/>\n    <button type=\'submit\' class=\'submit-btn\' id=\'l-btn\'>Se connecter →</button>\n  </form>\n  <div class=\'hint\' id=\'l-hint\'>Contactez l\'administrateur pour vos accès.</div>\n</div>\n<script>\nconst LT={\n  fr:{sub:\'Gestion Budgétaire — SAAF / DCF / Contrôle Budgétaire\',user:\'IDENTIFIANT\',pass:\'MOT DE PASSE\',btn:\'Se connecter →\',hint:"Contactez l\'administrateur pour vos accès.",uph:\'admin\',pph:\'••••••••\'},\n  en:{sub:\'Budget Management — SAAF / DCF / Budget Control\',user:\'USERNAME\',pass:\'PASSWORD\',btn:\'Sign in →\',hint:\'Contact your administrator for access.\',uph:\'admin\',pph:\'••••••••\'}\n};\nlet curL=localStorage.getItem(\'camtel_lang\')||\'fr\';\nfunction setLang(l){\n  curL=l;localStorage.setItem(\'camtel_lang\',l);\n  const tx=LT[l];\n  document.getElementById(\'l-sub\').textContent=tx.sub;\n  document.getElementById(\'l-user\').textContent=tx.user;\n  document.getElementById(\'l-pass\').textContent=tx.pass;\n  document.getElementById(\'l-btn\').textContent=tx.btn;\n  document.getElementById(\'l-hint\').textContent=tx.hint;\n  document.getElementById(\'inp-user\').placeholder=tx.uph;\n  document.getElementById(\'inp-pass\').placeholder=tx.pph;\n  document.getElementById(\'lb-fr\').className=\'lang-btn\'+(l===\'fr\'?\' active\':\'\');\n  document.getElementById(\'lb-en\').className=\'lang-btn\'+(l===\'en\'?\' active\':\'\');\n}\nsetLang(curL);\n\nasync function doLogin(e){\n  e.preventDefault();\n  const btn=document.getElementById(\'l-btn\');\n  const u=document.getElementById(\'inp-user\').value.trim();\n  const p=document.getElementById(\'inp-pass\').value;\n  btn.disabled=true; btn.textContent=\'...\';\n  try{\n    const r=await fetch(\'/api/login/token\',{\n      method:\'POST\',\n      headers:{\'Content-Type\':\'application/json\'},\n      body:JSON.stringify({username:u,password:p})\n    });\n    if(r.ok){\n      const d=await r.json();\n      localStorage.setItem(\'camtel_token\',d.token);\n      localStorage.setItem(\'camtel_role\',d.role);\n      window.location=\'/\';\n    } else {\n      document.getElementById(\'__ERR__\').innerHTML="<div class=\'err\'>❌ Identifiants incorrects.</div>";\n      btn.disabled=false; btn.textContent=LT[curL].btn;\n    }\n  }catch(err){\n    document.getElementById(\'__ERR__\').innerHTML="<div class=\'err\'>❌ Erreur serveur.</div>";\n    btn.disabled=false; btn.textContent=LT[curL].btn;\n  }\n}\n</script>\n</body></html>'
