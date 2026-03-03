@@ -450,6 +450,25 @@ def _parse_tx_row_camtel(row, headers):
 # APP BOOTSTRAP
 # ══════════════════════════════════════════════════════════════════
 def init_db():
+    dialect = engine.dialect.name
+
+    # PRE-MIGRATION: rename old column BEFORE create_all to avoid ORM errors.
+    # Uses information_schema directly (not cached sa_inspect).
+    try:
+        with engine.begin() as _conn:
+            if dialect == "postgresql":
+                _row = _conn.execute(text(
+                    "SELECT 1 FROM information_schema.columns "
+                    "WHERE table_name='users' AND column_name='hashed_password'"
+                )).fetchone()
+                if _row:
+                    _conn.execute(text(
+                        "ALTER TABLE users RENAME COLUMN hashed_password TO password"
+                    ))
+                    log.info("Schema migration: renamed hashed_password -> password")
+    except Exception as _pre_err:
+        log.warning("Pre-migration column rename skipped: %s", _pre_err)
+
     Base.metadata.create_all(engine)
     log.info("Tables created")
 
@@ -457,28 +476,22 @@ def init_db():
     # Render deployments sometimes reuse an older DB schema; create_all() won't add columns.
     try:
         insp = sa_inspect(engine)
-        dialect = engine.dialect.name
 
         def _colnames(table: str):
             try:
+                # Query information_schema directly to avoid stale inspector cache
+                with engine.connect() as _c:
+                    _rows = _c.execute(text(
+                        "SELECT column_name FROM information_schema.columns WHERE table_name=:t"
+                    ), {"t": table}).fetchall()
+                    if _rows:
+                        return {r[0] for r in _rows}
                 return {c["name"] for c in insp.get_columns(table)}
             except Exception:
                 return set()
 
         users_cols = _colnames("users")
         if users_cols:
-            # Rename hashed_password → password if DB was created with old schema
-            if "hashed_password" in users_cols and "password" not in users_cols:
-                try:
-                    with engine.begin() as conn:
-                        conn.execute(text(
-                            "ALTER TABLE users RENAME COLUMN hashed_password TO password"
-                        ))
-                    users_cols = _colnames("users")  # refresh after rename
-                    log.info("Schema migration: renamed hashed_password -> password")
-                except Exception as rename_err:
-                    log.warning("Could not rename hashed_password column: %s", rename_err)
-
             # Columns added over versions
             missing = []
             if "is_active" not in users_cols:
