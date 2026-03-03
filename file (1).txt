@@ -1,3 +1,0 @@
-NODE_ENV=production
-DATABASE_URL=your_postgres_url
-PORT=3000
