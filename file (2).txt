@@ -1,0 +1,4 @@
+Environment → Environment Variables
+PORT=3000
+NODE_ENV=production
+DATABASE_URL=your_database_url

@@ -1,5 +1,8 @@
-# Render logs
-render logs -s web
+# Health check
+curl https://camtel-budget-app.onrender.com/health
 
-# Local logs
-tail -f logs/app.log
+# Import endpoint
+curl -X GET https://camtel-budget-app.onrender.com/api/import/template
+
+# Frontend
+https://camtel-budget-app.onrender.com

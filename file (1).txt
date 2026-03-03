@@ -1,3 +1,15 @@
-NODE_ENV=production
-DATABASE_URL=your_postgres_url
-PORT=3000
+camtel-budget-app/
+├── Dockerfile                 ✅ NEW
+├── .dockerignore             ✅ NEW
+├── package.json
+├── server.js
+├── routes/
+│   ├── import.js
+│   ├── export.js
+│   ├── reports.js
+│   └── ...
+├── validators/
+├── models/
+├── public/
+├── .env.example
+└── README.md
