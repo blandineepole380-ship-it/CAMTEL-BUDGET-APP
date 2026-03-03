@@ -59,7 +59,7 @@ class User(Base):
     __tablename__ = "users"
     id         = Column(Integer, primary_key=True, index=True)
     username   = Column(String(80),  unique=True, nullable=False, index=True)
-    password   = Column(String(128), nullable=False)
+    password   = Column("hashed_password", String(128), nullable=False)
     full_name  = Column(String(200), default="")
     role       = Column(String(20),  default="agent")
     directions = Column(Text,        default="[]")
@@ -451,24 +451,6 @@ def _parse_tx_row_camtel(row, headers):
 # ══════════════════════════════════════════════════════════════════
 def init_db():
     dialect = engine.dialect.name
-
-    # PRE-MIGRATION: rename old column BEFORE create_all to avoid ORM errors.
-    # Uses information_schema directly (not cached sa_inspect).
-    try:
-        with engine.begin() as _conn:
-            if dialect == "postgresql":
-                _row = _conn.execute(text(
-                    "SELECT 1 FROM information_schema.columns "
-                    "WHERE table_name='users' AND column_name='hashed_password'"
-                )).fetchone()
-                if _row:
-                    _conn.execute(text(
-                        "ALTER TABLE users RENAME COLUMN hashed_password TO password"
-                    ))
-                    log.info("Schema migration: renamed hashed_password -> password")
-    except Exception as _pre_err:
-        log.warning("Pre-migration column rename skipped: %s", _pre_err)
-
     Base.metadata.create_all(engine)
     log.info("Tables created")
 
