@@ -59,7 +59,7 @@ class User(Base):
     __tablename__ = "users"
     id         = Column(Integer, primary_key=True, index=True)
     username   = Column(String(80),  unique=True, nullable=False, index=True)
-    password   = Column("hashed_password", String(128), nullable=False)
+    password   = Column(String(128), nullable=False)
     full_name  = Column(String(200), default="")
     role       = Column(String(20),  default="agent")
     directions = Column(Text,        default="[]")
@@ -451,6 +451,32 @@ def _parse_tx_row_camtel(row, headers):
 # ══════════════════════════════════════════════════════════════════
 def init_db():
     dialect = engine.dialect.name
+
+    # PRE-MIGRATION: runs BEFORE create_all so the ORM never sees the wrong schema.
+    # Case 1 — column is 'hashed_password' : rename to 'password'
+    # Case 2 — password column is missing  : add 'password' VARCHAR(128)
+    # Case 3 — column already 'password'   : nothing to do
+    try:
+        with engine.begin() as _c:
+            _rows = _c.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name='users'"
+            )).fetchall()
+            _cols = {r[0] for r in _rows}
+            if _cols:                                              # table exists
+                if "password" not in _cols and "hashed_password" in _cols:
+                    _c.execute(text(
+                        "ALTER TABLE users RENAME COLUMN hashed_password TO password"
+                    ))
+                    log.info("Migration: renamed hashed_password -> password")
+                elif "password" not in _cols:
+                    _c.execute(text(
+                        "ALTER TABLE users ADD COLUMN password VARCHAR(128) NOT NULL DEFAULT ''"
+                    ))
+                    log.info("Migration: added missing password column")
+    except Exception as _pre_err:
+        log.warning("Pre-migration skipped: %s", _pre_err)
+
     Base.metadata.create_all(engine)
     log.info("Tables created")
 
