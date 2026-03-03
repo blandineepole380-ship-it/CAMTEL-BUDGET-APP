@@ -1,15 +1,7 @@
-camtel-budget-app/
-├── Dockerfile                 ✅ NEW
-├── .dockerignore             ✅ NEW
-├── package.json
-├── server.js
-├── routes/
-│   ├── import.js
-│   ├── export.js
-│   ├── reports.js
-│   └── ...
-├── validators/
-├── models/
-├── public/
-├── .env.example
-└── README.md
+node_modules
+npm-debug.log
+.git
+.gitignore
+.env.local
+dist
+.DS_Store

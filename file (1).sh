@@ -1,8 +1,5 @@
-# Health check
-curl https://camtel-budget-app.onrender.com/health
+git add Dockerfile .dockerignore
 
-# Import endpoint
-curl -X GET https://camtel-budget-app.onrender.com/api/import/template
+git commit -m "Add Dockerfile for deployment"
 
-# Frontend
-https://camtel-budget-app.onrender.com
+git push origin main

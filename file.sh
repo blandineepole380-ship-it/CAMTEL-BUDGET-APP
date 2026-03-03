@@ -1,8 +1,8 @@
-# Add files to git
-git add Dockerfile .dockerignore package.json
+git status
+# Should show Dockerfile in the list
 
-# Commit changes
-git commit -m "Add Docker configuration for Render deployment"
+git log --oneline
+# Should show your commit
 
-# Push to GitHub
-git push origin main
+git ls-files | grep Dockerfile
+# Should show: Dockerfile
