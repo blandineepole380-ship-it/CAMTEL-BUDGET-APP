@@ -467,10 +467,23 @@ def init_db():
 
         users_cols = _colnames("users")
         if users_cols:
+            # Rename hashed_password → password if DB was created with old schema
+            if "hashed_password" in users_cols and "password" not in users_cols:
+                try:
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            "ALTER TABLE users RENAME COLUMN hashed_password TO password"
+                        ))
+                    users_cols = _colnames("users")  # refresh after rename
+                    log.info("Schema migration: renamed hashed_password -> password")
+                except Exception as rename_err:
+                    log.warning("Could not rename hashed_password column: %s", rename_err)
+
             # Columns added over versions
             missing = []
             if "is_active" not in users_cols:
-                missing.append(("is_active", "BOOLEAN", "1"))
+                bool_default = "TRUE" if dialect == "postgresql" else "1"
+                missing.append(("is_active", "BOOLEAN", bool_default))
             if "email" not in users_cols:
                 missing.append(("email", "VARCHAR(200)", "''"))
             if "full_name" not in users_cols:
