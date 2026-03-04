@@ -1,8 +1,0 @@
-your-repo/
-├── Dockerfile              ← MUST BE HERE
-├── .dockerignore           ← MUST BE HERE
-├── package.json
-├── server.js
-├── routes/
-├── .git/
-└── ...rest of files
