@@ -7,6 +7,11 @@ from datetime import date, datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, Depends, HTTPException, UploadFile, File, Form
+try:
+    import openpyxl
+    HAS_OPENPYXL = True
+except ImportError:
+    HAS_OPENPYXL = False
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from itsdangerous import URLSafeSerializer, BadSignature
@@ -123,6 +128,24 @@ def decode_csv(raw: bytes) -> str:
         try: return raw.decode(enc)
         except: pass
     return raw.decode("latin-1", errors="replace")
+
+def read_file_rows(raw: bytes, filename: str = "") -> list:
+    """Read CSV or XLSX and return list of rows (list of strings)."""
+    fname = filename.lower()
+    if (fname.endswith(".xlsx") or fname.endswith(".xls")) and HAS_OPENPYXL:
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            ws = wb.active
+            rows = []
+            for row in ws.iter_rows(values_only=True):
+                rows.append([str(c).strip() if c is not None else "" for c in row])
+            wb.close()
+            return rows
+        except Exception as e:
+            log.warning("xlsx read failed: %s, falling back to csv", e)
+    # CSV fallback
+    txt = decode_csv(raw)
+    return list(csv.reader(txt.splitlines()))
 
 def extract_imputation(col6: str) -> str:
     """From 'SP4/DRH/.../66410200>>>LIBELLE' extract '66410200'"""
@@ -396,10 +419,13 @@ async def import_txs(request: Request, file: UploadFile = File(...),
     raw = await file.read()
     created = 0; errors = []
     try:
-        txt   = decode_csv(raw)
-        lines = txt.splitlines()
-        hi    = find_header_row(lines)
-        for ri, row in enumerate(csv.reader(lines[hi+1:]), hi+2):
+        all_rows = read_file_rows(raw, file.filename or "")
+        hi = 0
+        for i, row in enumerate(all_rows):
+            joined = " ".join(str(c) for c in row).upper()
+            if "DATE ENGAGEMENT" in joined or ("DIRECTION" in joined and "MONTANT" in joined):
+                hi = i; break
+        for ri, row in enumerate(all_rows[hi+1:], hi+2):
             try:
                 r = parse_camtel_tx(row)
                 if not r: continue
@@ -427,33 +453,62 @@ async def import_bls(request: Request, file: UploadFile = File(...),
     raw = await file.read()
     created = updated = skipped = 0; errors = []
     try:
-        txt    = decode_csv(raw)
-        reader = csv.DictReader(io.StringIO(txt))
-        for ri, row in enumerate(reader, 2):
-            try:
-                def g(*keys):
-                    for k in keys:
-                        for rk in row:
-                            if rk and k.upper() in rk.upper():
-                                v = row[rk]
-                                if v and str(v).strip(): return str(v).strip()
-                    return ""
-                yr_s  = g("YEAR","ANNEE") or str(year)
-                dirn  = g("DIRECTION").upper()
-                imp   = g("IMPUTATION")
-                lib   = g("LIBELLE","DESCRIPTION")
-                nat   = g("NATURE") or "DEPENSE COURANTE"
-                bcp_s = g("BUDGET CP","MONTANT","BUDGET")
-                if not yr_s or not dirn or not imp: skipped += 1; continue
-                yr  = int(float(yr_s)); bcp = clean_amount(bcp_s)
-                ex  = db.query(BudgetLine).filter_by(year=yr,direction=dirn,imputation=imp).first()
-                if ex:
-                    ex.libelle=lib; ex.nature=nat; ex.budget_cp=bcp; updated+=1
-                else:
-                    db.add(BudgetLine(year=yr,direction=dirn,imputation=imp,
-                                      libelle=lib,nature=nat,budget_cp=bcp)); created+=1
-            except Exception as e:
-                errors.append(f"L{ri}: {e}")
+        all_rows = read_file_rows(raw, file.filename or "")
+        # Detect format: standard CSV (has YEAR header) or BUDGET_ANNEXE (positional)
+        header_row = all_rows[0] if all_rows else []
+        header_str = " ".join(str(c) for c in header_row).upper()
+        is_standard = "YEAR" in header_str or "ANNEE" in header_str or "BUDGET CP" in header_str
+
+        if is_standard:
+            # Standard format: YEAR, DIRECTION, IMPUTATION COMPTABLE, LIBELLE, NATURE, BUDGET CP (FCFA)
+            headers = [str(c).strip().upper() for c in header_row]
+            def get_col(row, *keys):
+                for k in keys:
+                    for i, h in enumerate(headers):
+                        if k.upper() in h and i < len(row):
+                            v = str(row[i]).strip()
+                            if v and v.upper() not in ("NONE",""):
+                                return v
+                return ""
+            for ri, row in enumerate(all_rows[1:], 2):
+                try:
+                    yr_s = get_col(row,"YEAR","ANNEE") or str(year)
+                    dirn = get_col(row,"DIRECTION").upper()
+                    imp  = get_col(row,"IMPUTATION")
+                    lib  = get_col(row,"LIBELLE","DESCRIPTION")
+                    nat  = get_col(row,"NATURE") or "DEPENSE COURANTE"
+                    bcp_s= get_col(row,"BUDGET CP","MONTANT","BUDGET")
+                    if not dirn or not imp: skipped+=1; continue
+                    yr2 = int(float(yr_s)) if yr_s else (year or 2025)
+                    bcp = clean_amount(bcp_s)
+                    ex  = db.query(BudgetLine).filter_by(year=yr2,direction=dirn,imputation=imp).first()
+                    if ex: ex.libelle=lib;ex.nature=nat;ex.budget_cp=bcp;updated+=1
+                    else:
+                        db.add(BudgetLine(year=yr2,direction=dirn,imputation=imp,
+                                          libelle=lib,nature=nat,budget_cp=bcp));created+=1
+                except Exception as e: errors.append(f"L{ri}: {e}")
+        else:
+            # BUDGET_ANNEXE format: col[3]=DIRECTION, col[10]=IMPUTATION, col[11]=LIBELLE
+            # col[17]=budget2024, col[18]=budget2025, col[19]=budget2026
+            target_year = year or 2025
+            col_yr_map = {2024:17, 2025:18, 2026:19}
+            bcp_col = col_yr_map.get(target_year, 18)
+            for ri, row in enumerate(all_rows, 1):
+                try:
+                    if len(row) < 12: skipped+=1; continue
+                    dirn = str(row[3]).strip().upper()
+                    imp  = str(row[10]).strip()
+                    lib  = str(row[11]).strip()
+                    if not dirn or not imp or not imp[0].isdigit(): skipped+=1; continue
+                    bcp_s = str(row[bcp_col]).strip() if len(row) > bcp_col else "0"
+                    bcp = clean_amount(bcp_s)
+                    nat = "DEPENSE DE CAPITAL" if any(k in lib.upper() for k in ("CAPITAL","INVESTIS","EQUIPEM"))                           else "DEPENSE COURANTE"
+                    ex = db.query(BudgetLine).filter_by(year=target_year,direction=dirn,imputation=imp).first()
+                    if ex: ex.libelle=lib;ex.nature=nat;ex.budget_cp=bcp;updated+=1
+                    else:
+                        db.add(BudgetLine(year=target_year,direction=dirn,imputation=imp,
+                                          libelle=lib,nature=nat,budget_cp=bcp));created+=1
+                except Exception as e: errors.append(f"L{ri}: {e}")
         db.commit()
     except Exception as e:
         db.rollback(); return JSONResponse({"created":0,"updated":0,"errors":[str(e)]}, status_code=400)
