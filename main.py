@@ -429,12 +429,14 @@ async def import_txs(request: Request, file: UploadFile = File(...),
             try:
                 r = parse_camtel_tx(row)
                 if not r: continue
+                # Use year from the date itself; fallback to form year
+                row_year = r["year"] if r["year"] and 2000 <= r["year"] <= 2099 else year
                 tx = Transaction(date_reception=r["date"], direction=r["direction"],
                                  imputation=r["imputation"], intitule=r["intitule"],
                                  libelle=r["libelle"], nature=r["nature"],
                                  designation=r["designation"], code_ref=r["code_ref"],
-                                 montant=r["montant"], year=year, status="validated",
-                                 statut_budget=get_budget_status(db,r["imputation"],year),
+                                 montant=r["montant"], year=row_year, status="validated",
+                                 statut_budget=get_budget_status(db,r["imputation"],row_year),
                                  created_by=u["u"])
                 db.add(tx); created += 1
             except Exception as e:
@@ -454,61 +456,99 @@ async def import_bls(request: Request, file: UploadFile = File(...),
     created = updated = skipped = 0; errors = []
     try:
         all_rows = read_file_rows(raw, file.filename or "")
-        # Detect format: standard CSV (has YEAR header) or BUDGET_ANNEXE (positional)
-        header_row = all_rows[0] if all_rows else []
-        header_str = " ".join(str(c) for c in header_row).upper()
-        is_standard = "YEAR" in header_str or "ANNEE" in header_str or "BUDGET CP" in header_str
+        if not all_rows:
+            return JSONResponse({"created":0,"updated":0,"errors":["Empty file"]}, status_code=400)
+
+        # ── Detect file format ──────────────────────────────────────
+        h0 = " ".join(str(c) for c in all_rows[0]).upper()
+        h1 = " ".join(str(c) for c in (all_rows[1] if len(all_rows)>1 else [])).upper()
+        fname_up = (file.filename or "").upper()
+
+        is_standard   = "BUDGET CP" in h0 or ("YEAR" in h0 and "DIRECTION" in h0)
+        is_opex_capex = "SOUS PROGRAMMES" in h0 and "DEPENSES" in h0
+        is_budget_ann = "BUDGET ANNEXE" in h0 or ("REPORTS" in h0 and "2024" in h0)
+        is_capex_file = "CAPEX" in fname_up
+        target_year   = year or 2025
 
         if is_standard:
-            # Standard format: YEAR, DIRECTION, IMPUTATION COMPTABLE, LIBELLE, NATURE, BUDGET CP (FCFA)
-            headers = [str(c).strip().upper() for c in header_row]
-            def get_col(row, *keys):
+            # ── FORMAT 1: Standard CSV ─────────────────────────────
+            # YEAR, DIRECTION, IMPUTATION COMPTABLE, LIBELLE, NATURE, BUDGET CP (FCFA)
+            headers = [str(c).strip().upper() for c in all_rows[0]]
+            def gc(row, *keys):
                 for k in keys:
-                    for i, h in enumerate(headers):
-                        if k.upper() in h and i < len(row):
+                    for i,h in enumerate(headers):
+                        if k in h and i < len(row):
                             v = str(row[i]).strip()
-                            if v and v.upper() not in ("NONE",""):
-                                return v
+                            if v and v.upper() not in ("NONE",""): return v
                 return ""
             for ri, row in enumerate(all_rows[1:], 2):
                 try:
-                    yr_s = get_col(row,"YEAR","ANNEE") or str(year)
-                    dirn = get_col(row,"DIRECTION").upper()
-                    imp  = get_col(row,"IMPUTATION")
-                    lib  = get_col(row,"LIBELLE","DESCRIPTION")
-                    nat  = get_col(row,"NATURE") or "DEPENSE COURANTE"
-                    bcp_s= get_col(row,"BUDGET CP","MONTANT","BUDGET")
+                    yr_s = gc(row,"YEAR","ANNEE") or str(target_year)
+                    dirn = gc(row,"DIRECTION").upper()
+                    imp  = gc(row,"IMPUTATION")
+                    lib  = gc(row,"LIBELLE","DESCRIPTION")
+                    nat  = gc(row,"NATURE") or "DEPENSE COURANTE"
+                    bcp  = clean_amount(gc(row,"BUDGET CP","MONTANT","BUDGET"))
                     if not dirn or not imp: skipped+=1; continue
-                    yr2 = int(float(yr_s)) if yr_s else (year or 2025)
-                    bcp = clean_amount(bcp_s)
-                    ex  = db.query(BudgetLine).filter_by(year=yr2,direction=dirn,imputation=imp).first()
+                    yr2  = int(float(yr_s)) if yr_s else target_year
+                    ex   = db.query(BudgetLine).filter_by(year=yr2,direction=dirn,imputation=imp).first()
                     if ex: ex.libelle=lib;ex.nature=nat;ex.budget_cp=bcp;updated+=1
-                    else:
-                        db.add(BudgetLine(year=yr2,direction=dirn,imputation=imp,
-                                          libelle=lib,nature=nat,budget_cp=bcp));created+=1
+                    else: db.add(BudgetLine(year=yr2,direction=dirn,imputation=imp,
+                                            libelle=lib,nature=nat,budget_cp=bcp));created+=1
                 except Exception as e: errors.append(f"L{ri}: {e}")
+
+        elif is_opex_capex:
+            # ── FORMAT 2: OPEX_FILE / CAPEX_FILE ──────────────────
+            # 2 header rows. Data from row 2.
+            # col[3]=DIRECTION, col[10]=IMPUTATION, col[11]=LIBELLE
+            # col[17]=CP_2024, col[18]=CP_2025, col[19]=CP_2026
+            nature = "DEPENSE DE CAPITAL" if is_capex_file else "DEPENSE COURANTE"
+            yr_col_map = {2024:17, 2025:18, 2026:19}
+            # Import ALL years that have data, or just target_year if specified
+            years_to_import = [target_year] if target_year else [2024,2025,2026]
+            for row in all_rows[2:]:
+                if len(row) < 18: skipped+=1; continue
+                dirn = str(row[3]).strip().upper()
+                imp  = str(row[10]).strip()
+                lib  = str(row[11]).strip()
+                if not dirn or not imp or not re.match(r"^\d{6,10}$", imp):
+                    skipped+=1; continue
+                for yr2 in years_to_import:
+                    col = yr_col_map.get(yr2, 18)
+                    bcp = clean_amount(row[col]) if len(row) > col else 0
+                    if bcp <= 0: continue
+                    try:
+                        ex = db.query(BudgetLine).filter_by(year=yr2,direction=dirn,imputation=imp).first()
+                        if ex: ex.libelle=lib;ex.nature=nature;ex.budget_cp=bcp;updated+=1
+                        else: db.add(BudgetLine(year=yr2,direction=dirn,imputation=imp,
+                                                libelle=lib,nature=nature,budget_cp=bcp));created+=1
+                    except Exception as e: errors.append(f"R{all_rows.index(row)} Y{yr2}: {e}")
+
         else:
-            # BUDGET_ANNEXE format: col[3]=DIRECTION, col[10]=IMPUTATION, col[11]=LIBELLE
-            # col[17]=budget2024, col[18]=budget2025, col[19]=budget2026
-            target_year = year or 2025
-            col_yr_map = {2024:17, 2025:18, 2026:19}
-            bcp_col = col_yr_map.get(target_year, 18)
-            for ri, row in enumerate(all_rows, 1):
-                try:
-                    if len(row) < 12: skipped+=1; continue
-                    dirn = str(row[3]).strip().upper()
-                    imp  = str(row[10]).strip()
-                    lib  = str(row[11]).strip()
-                    if not dirn or not imp or not imp[0].isdigit(): skipped+=1; continue
-                    bcp_s = str(row[bcp_col]).strip() if len(row) > bcp_col else "0"
-                    bcp = clean_amount(bcp_s)
-                    nat = "DEPENSE DE CAPITAL" if any(k in lib.upper() for k in ("CAPITAL","INVESTIS","EQUIPEM"))                           else "DEPENSE COURANTE"
-                    ex = db.query(BudgetLine).filter_by(year=target_year,direction=dirn,imputation=imp).first()
-                    if ex: ex.libelle=lib;ex.nature=nat;ex.budget_cp=bcp;updated+=1
-                    else:
-                        db.add(BudgetLine(year=target_year,direction=dirn,imputation=imp,
-                                          libelle=lib,nature=nat,budget_cp=bcp));created+=1
-                except Exception as e: errors.append(f"L{ri}: {e}")
+            # ── FORMAT 3: BUDGET_ANNEXE / fallback positional ─────
+            # col[3]=DIRECTION, col[10]=IMPUTATION, col[11]=LIBELLE
+            # col[17]=CP_2024, col[18]=CP_2025, col[19]=CP_2026
+            yr_col_map = {2024:17, 2025:18, 2026:19}
+            years_to_import = [target_year] if target_year else [2024,2025,2026]
+            data_start = 3 if is_budget_ann else 2
+            for ri, row in enumerate(all_rows[data_start:], data_start+1):
+                if len(row) < 12: skipped+=1; continue
+                dirn = str(row[3]).strip().upper()
+                imp  = str(row[10]).strip()
+                lib  = str(row[11]).strip()
+                if not dirn or not imp or not re.match(r"^\d{6,10}$", imp):
+                    skipped+=1; continue
+                nat = "DEPENSE COURANTE"
+                for yr2 in years_to_import:
+                    col = yr_col_map.get(yr2, 17)
+                    bcp = clean_amount(row[col]) if len(row) > col else 0
+                    if bcp <= 0: continue
+                    try:
+                        ex = db.query(BudgetLine).filter_by(year=yr2,direction=dirn,imputation=imp).first()
+                        if ex: ex.libelle=lib;ex.nature=nat;ex.budget_cp=bcp;updated+=1
+                        else: db.add(BudgetLine(year=yr2,direction=dirn,imputation=imp,
+                                                libelle=lib,nature=nat,budget_cp=bcp));created+=1
+                    except Exception as e: errors.append(f"L{ri} Y{yr2}: {e}")
         db.commit()
     except Exception as e:
         db.rollback(); return JSONResponse({"created":0,"updated":0,"errors":[str(e)]}, status_code=400)
@@ -931,10 +971,10 @@ tr:hover td{background:rgba(0,50,130,.12)}
       <div class="cb">
         <div class="alrt ab" style="font-size:10px;margin-bottom:12px">
           <b>Format CAMTEL :</b> DATE ENGAGEMENT · DIRECTION · INTITULE · LIBELLE · NATURE · DESIGNATION · IMPUTATION COMPTABLE · MONTANT<br>
-          <span style="opacity:.8">La ligne "SITUATION DES ENGAGEMENTS..." est ignorée automatiquement.</span>
+          <span style="opacity:.8">✅ <b>Multi-années :</b> L'année est détectée automatiquement depuis la date de chaque ligne. Un seul fichier peut contenir 2023, 2024, 2025... ils seront tous importés correctement.</span>
         </div>
         <div class="fld">
-          <label>Année *</label>
+          <label>Année par défaut (si date illisible)</label>
           <input type="number" id="tx-yr-imp" value="2025" min="2020" max="2035">
         </div>
         <!--
@@ -967,12 +1007,15 @@ tr:hover td{background:rgba(0,50,130,.12)}
       </div>
       <div class="cb">
         <div class="alrt ab" style="font-size:10px;margin-bottom:12px">
-          <b>Colonnes :</b> YEAR · DIRECTION · IMPUTATION COMPTABLE · LIBELLE · NATURE · BUDGET CP (FCFA)<br>
-          <span style="opacity:.8">Upsert automatique — les lignes existantes sont mises à jour.</span>
+          <b>Fichiers acceptés :</b><br>
+          • <b>Standard CSV</b> — colonnes: YEAR · DIRECTION · IMPUTATION · LIBELLE · NATURE · BUDGET CP (FCFA)<br>
+          • <b>OPEX_FILE / CAPEX_FILE</b> — format CAMTEL avec colonnes CP 2024/2025/2026<br>
+          • <b>BUDGET_ANNEXE</b> — format rapport avec colonnes par année<br>
+          <span style="opacity:.8">✅ Upsert auto. Mettez <b>0</b> pour importer TOUTES les années du fichier.</span>
         </div>
         <div class="fld">
-          <label>Année (si absente du fichier)</label>
-          <input type="number" id="bl-yr-imp" value="2025" min="2020" max="2035">
+          <label>Année cible (0 = toutes les années du fichier)</label>
+          <input type="number" id="bl-yr-imp" value="0" min="0" max="2035">
         </div>
         <input type="file" id="bl-file-inp" accept=".csv,.xlsx,.xls,.txt"
           style="position:fixed;left:-9999px;top:-9999px;opacity:0;width:1px;height:1px"
@@ -1429,19 +1472,17 @@ async function doImportTx(){
     if(resp.status===403){ res.innerHTML='<div class="alrt ar">❌ Accès refusé — rôle insuffisant</div>'; return; }
     if(!resp.ok){ const t=await resp.text(); res.innerHTML='<div class="alrt ar">❌ Erreur serveur ('+resp.status+'): '+t.slice(0,200)+'</div>'; return; }
     const d=await resp.json();
-    const errHtml=d.errors&&d.errors.length?`<details style="margin-top:4px"><summary style="cursor:pointer;font-size:10px">⚠ ${d.errors.length} erreur(s)</summary><div style="font-size:10px;max-height:80px;overflow-y:auto;margin-top:4px">${d.errors.join('<br>')}</div></details>`:'';
     if(d.created>0){
-      res.innerHTML=`<div class="alrt ag">✅ ${d.created} transaction(s) importée(s) pour ${y}${errHtml}</div>`;
+      res.innerHTML=`<div class="alrt ag">✅ ${d.created} transaction(s) importée(s) pour ${y}</div>`;
       fi.value=''; document.getElementById('tx-file-name').textContent='';
       const dz=document.getElementById('tx-dz'); dz.style.borderColor=''; dz.style.background='';
-      // Add year to selector if new
       const sel=document.getElementById('g-yr');
       if(!Array.from(sel.options).find(o=>parseInt(o.value)===y)){
         const opt=document.createElement('option'); opt.value=y; opt.textContent=y; sel.appendChild(opt);
       }
       sel.value=y; await loadDash();
     } else {
-      res.innerHTML=`<div class="alrt ay">⚠ 0 ligne importée. Vérifiez que le fichier a les colonnes: DATE ENGAGEMENT, DIRECTION, INTITULE, IMPUTATION COMPTABLE, MONTANT${errHtml}</div>`;
+      res.innerHTML=`<div class="alrt ay">⚠ Aucune transaction importée. Vérifiez le fichier et réessayez.</div>`;
     }
   } catch(e){ res.innerHTML='<div class="alrt ar">❌ Erreur réseau: '+e.message+'</div>'; }
 }
@@ -1466,14 +1507,13 @@ async function doImportBL(){
     if(resp.status===403){ res.innerHTML='<div class="alrt ar">❌ Accès refusé (admin/dcf_dir/dcf_sub requis)</div>'; return; }
     if(!resp.ok){ const t=await resp.text(); res.innerHTML='<div class="alrt ar">❌ Erreur serveur ('+resp.status+'): '+t.slice(0,200)+'</div>'; return; }
     const d=await resp.json();
-    const errHtml=d.errors&&d.errors.length?`<details style="margin-top:4px"><summary style="cursor:pointer;font-size:10px">⚠ ${d.errors.length} erreur(s)</summary><div style="font-size:10px;max-height:80px;overflow-y:auto">${d.errors.join('<br>')}</div></details>`:'';
     if(d.created>0||d.updated>0){
-      res.innerHTML=`<div class="alrt ag">✅ ${d.created} créée(s), ${d.updated} mise(s) à jour${errHtml}</div>`;
+      res.innerHTML=`<div class="alrt ag">✅ ${d.created} créée(s), ${d.updated} mise(s) à jour</div>`;
       fi.value=''; document.getElementById('bl-file-name').textContent='';
       const dz=document.getElementById('bl-dz'); dz.style.borderColor=''; dz.style.background='';
       await loadBLs();
     } else {
-      res.innerHTML=`<div class="alrt ay">⚠ 0 ligne importée. Colonnes requises: YEAR, DIRECTION, IMPUTATION COMPTABLE, BUDGET CP (FCFA)${errHtml}</div>`;
+      res.innerHTML=`<div class="alrt ay">⚠ Aucune ligne importée. Vérifiez le fichier et réessayez.</div>`;
     }
   } catch(e){ res.innerHTML='<div class="alrt ar">❌ Erreur réseau: '+e.message+'</div>'; }
 }
