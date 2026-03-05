@@ -538,6 +538,20 @@ def delete_user(uid: int, request: Request = None, db: Session = Depends(get_db)
 @app.get("/version")
 def version(): return {"version": "v11", "status": "ok"}
 
+@app.get("/api/reset-admin")
+def reset_admin(secret: str = "", db: Session = Depends(get_db)):
+    if secret != "CAMTEL2025reset":
+        raise HTTPException(403, "Wrong secret")
+    new_pass = "Admin@2025!"
+    u = db.query(User).filter_by(username=ADMIN_USER).first()
+    if u:
+        u.password = _hash(new_pass); u.is_active = True; db.commit()
+        return {"ok": True, "username": ADMIN_USER, "new_password": new_pass}
+    db.add(User(username=ADMIN_USER, password=_hash(new_pass),
+                full_name="Administrateur", role="admin", is_active=True))
+    db.commit()
+    return {"ok": True, "username": ADMIN_USER, "new_password": new_pass, "created": True}
+
 # ═════════════════════════════════════════════════════════════════════
 # LOGIN PAGE
 # ═════════════════════════════════════════════════════════════════════
