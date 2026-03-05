@@ -186,11 +186,15 @@ async def lifespan(app):
     engine.dispose()
     db = SessionLocal()
     try:
-        if not db.query(User).filter_by(username=ADMIN_USER).first():
+        existing = db.query(User).filter_by(username=ADMIN_USER).first()
+        if not existing:
             db.add(User(username=ADMIN_USER, password=_hash(ADMIN_PASS),
-                        full_name="Administrateur", role="admin"))
+                        full_name="Administrateur", role="admin", is_active=True))
             db.commit()
             log.info("Admin created: %s", ADMIN_USER)
+        elif existing.role != "admin":
+            existing.role = "admin"; existing.is_active = True; db.commit()
+            log.info("Admin role fixed: %s", ADMIN_USER)
     except Exception as e:
         db.rollback(); log.error("seed: %s", e)
     finally: db.close()
@@ -228,11 +232,15 @@ def do_logout():
 
 @app.get("/api/me")
 def api_me(request: Request, db: Session = Depends(get_db)):
-    u = current_user(request)
+    tok = current_user(request)
+    # Always fetch fresh role from DB (token may have stale role)
+    db_user = db.query(User).filter_by(username=tok["u"], is_active=True).first()
+    if not db_user: raise HTTPException(401, "User not found")
     years = [r[0] for r in db.query(Transaction.year).distinct().order_by(Transaction.year.desc()).all()]
     if not years: years = [date.today().year]
     if date.today().year not in years: years.insert(0, date.today().year)
-    return {**u, "years": sorted(set(years), reverse=True)}
+    return {"u": db_user.username, "role": db_user.role, "name": db_user.full_name,
+            "years": sorted(set(years), reverse=True)}
 
 # ── DASHBOARD ─────────────────────────────────────────────────────────
 @app.get("/api/dashboard")
@@ -545,12 +553,12 @@ def reset_admin(secret: str = "", db: Session = Depends(get_db)):
     new_pass = "Admin@2025!"
     u = db.query(User).filter_by(username=ADMIN_USER).first()
     if u:
-        u.password = _hash(new_pass); u.is_active = True; db.commit()
-        return {"ok": True, "username": ADMIN_USER, "new_password": new_pass}
+        u.password = _hash(new_pass); u.is_active = True; u.role = "admin"; db.commit()
+        return {"ok": True, "username": ADMIN_USER, "new_password": new_pass, "role": u.role}
     db.add(User(username=ADMIN_USER, password=_hash(new_pass),
                 full_name="Administrateur", role="admin", is_active=True))
     db.commit()
-    return {"ok": True, "username": ADMIN_USER, "new_password": new_pass, "created": True}
+    return {"ok": True, "username": ADMIN_USER, "new_password": new_pass, "role": "admin", "created": True}
 
 # ═════════════════════════════════════════════════════════════════════
 # LOGIN PAGE
