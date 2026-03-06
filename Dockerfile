@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Python dependencies inline (no requirements.txt needed in repo)
+# Install Python dependencies inline
 RUN pip install --no-cache-dir \
     fastapi==0.115.0 \
     "uvicorn[standard]==0.30.6" \
@@ -18,12 +18,16 @@ RUN pip install --no-cache-dir \
     python-multipart==0.0.12 \
     aiofiles==24.1.0
 
-# Install Node pptxgenjs inline (no package.json needed in repo)
+# Install Node pptxgenjs inline
 RUN echo '{"name":"kpi-pptx","version":"1.0.0","dependencies":{"pptxgenjs":"^3.12.0"}}' > package.json \
     && npm install
 
-# Copy application code
+# Copy ALL repo contents
 COPY . .
+
+# If your main.py is inside a subfolder (e.g. kpi-backend/), move into it
+# Change "kpi-backend" below to match your actual folder name if different
+WORKDIR /app/kpi-backend
 
 # Create required runtime directories
 RUN mkdir -p uploads outputs
