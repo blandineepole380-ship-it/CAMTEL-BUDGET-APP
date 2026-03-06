@@ -22,12 +22,8 @@ RUN pip install --no-cache-dir \
 RUN echo '{"name":"kpi-pptx","version":"1.0.0","dependencies":{"pptxgenjs":"^3.12.0"}}' > package.json \
     && npm install
 
-# Copy ALL repo contents
+# Copy ALL repo contents (main.py must be at repo root)
 COPY . .
-
-# If your main.py is inside a subfolder (e.g. kpi-backend/), move into it
-# Change "kpi-backend" below to match your actual folder name if different
-WORKDIR /app/kpi-backend
 
 # Create required runtime directories
 RUN mkdir -p uploads outputs
