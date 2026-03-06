@@ -10,7 +10,24 @@ from typing import Optional, List
 from datetime import datetime
 import os, json
 
-app = FastAPI(title="KPI Manager API", version="1.0.0")
+app = FastAPI(
+    title="KPI Manager API",
+    version="1.0.0",
+    docs_url=None,  # disable default docs so we can serve custom
+)
+
+# Fix blank /docs — use unpkg CDN for Swagger UI assets
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.responses import HTMLResponse
+
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui():
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title="KPI Manager API",
+        swagger_js_url="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js",
+        swagger_css_url="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css",
+    )
 
 app.add_middleware(
     CORSMiddleware,
