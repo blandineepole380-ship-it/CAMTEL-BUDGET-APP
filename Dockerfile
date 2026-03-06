@@ -12,9 +12,9 @@ RUN apt-get update && apt-get install -y \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install Node dependencies
-COPY package.json .
-RUN npm install
+# Create package.json inline and install pptxgenjs (no file needed in repo)
+RUN echo '{"name":"kpi-pptx","version":"1.0.0","dependencies":{"pptxgenjs":"^3.12.0"}}' > package.json \
+    && npm install
 
 # Copy application code
 COPY . .
