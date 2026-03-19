@@ -1,12 +1,8 @@
-# ============================================================
-# requirements.txt
-# Install: pip install -r requirements.txt
-# ============================================================
 flask==3.0.3
 flask-cors==4.0.1
 psycopg2-binary==2.9.9
 twilio==9.2.2
-campay==0.2.1
+campay==1.1.0
 africastalking==1.2.7
 requests==2.32.3
 python-dotenv==1.0.1
