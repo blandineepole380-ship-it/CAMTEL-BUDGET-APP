@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>CAMTEL — Générateur de Documents</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<script src="https://unpkg.com/docx@8.5.0/build/index.umd.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+<style>
+  :root{
+    --camtel-blue:#0066B3;
+    --camtel-dark:#003F6B;
+    --camtel-gray:#f3f4f6;
+  }
+  *{box-sizing:border-box;font-family:Arial,Helvetica,sans-serif;}
+  body{margin:0;padding:0;background:#e6e9ef;color:#222;}
+  header{background:linear-gradient(135deg,var(--camtel-blue),var(--camtel-dark));color:#fff;padding:18px 24px;box-shadow:0 2px 6px rgba(0,0,0,.2);}
+  header h1{margin:0;font-size:22px;letter-spacing:1px;}
+  header p{margin:4px 0 0;opacity:.9;font-size:13px;}
+  .container{max-width:1300px;margin:18px auto;padding:0 16px;display:grid;grid-template-columns:1fr 1fr;gap:16px;}
+  .card{background:#fff;border-radius:10px;padding:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);}
+  h2{color:var(--camtel-dark);border-bottom:2px solid var(--camtel-blue);padding-bottom:6px;margin-top:0;font-size:16px;}
+  .tabs{display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;}
+  .tab{padding:8px 14px;background:#fff;border:1px solid #cbd5e1;border-radius:6px 6px 0 0;cursor:pointer;font-weight:600;font-size:13px;}
+  .tab.active{background:var(--camtel-blue);color:#fff;border-color:var(--camtel-blue);}
+  .panel{display:none;}
+  .panel.active{display:block;}
+  label{display:block;margin-top:8px;font-size:12px;font-weight:600;color:#374151;}
+  input,select,textarea{width:100%;padding:6px 8px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;margin-top:2px;}
+  textarea{min-height:50px;resize:vertical;}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:8px;}
+  .row3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;}
+  .lineitems{margin-top:8px;border-top:1px dashed #94a3b8;padding-top:8px;}
+  .li{display:grid;grid-template-columns:1.4fr 2fr 1fr 1fr auto;gap:6px;align-items:end;margin-bottom:4px;}
+  .li input{font-size:12px;}
+  .btn{padding:10px 16px;background:var(--camtel-blue);color:#fff;border:none;border-radius:6px;cursor:pointer;font-weight:bold;margin-right:6px;margin-top:12px;}
+  .btn:hover{background:var(--camtel-dark);}
+  .btn.green{background:#0a9b46;}
+  .btn.red{background:#c0392b;}
+  .preview-wrap{background:#bcc;padding:12px;border-radius:8px;max-height:85vh;overflow:auto;}
+  .page{width:210mm;min-height:297mm;background:#fff;margin:0 auto;padding:18mm 18mm 14mm 18mm;position:relative;overflow:hidden;font-family:Arial,sans-serif;color:#000;}
+  .watermark{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%) rotate(-30deg);font-size:130px;color:rgba(0,102,179,0.07);font-weight:900;letter-spacing:14px;pointer-events:none;z-index:0;white-space:nowrap;}
+  .page > *{position:relative;z-index:1;}
+  .logo-row{display:flex;align-items:center;gap:10px;margin-bottom:8px;}
+  .logo-svg{width:120px;height:auto;}
+  .logo-sub{font-size:11px;font-style:italic;color:#000;line-height:1.2;}
+  .doc-title{text-align:center;font-size:24px;font-weight:bold;letter-spacing:2px;margin:18px 0 14px;}
+  .doc-meta{display:flex;justify-content:space-between;font-size:13px;margin-bottom:10px;}
+  .imp-table{width:100%;border-collapse:collapse;font-size:11px;}
+  .imp-table th,.imp-table td{border:1px solid #000;padding:5px 6px;vertical-align:middle;}
+  .imp-table th{background:#fff;font-weight:bold;text-align:center;height:26px;}
+  .imp-table td.acct{font-family:'Courier New',monospace;letter-spacing:6px;font-size:13px;text-align:left;padding-left:8px;}
+  .imp-table td.amt{text-align:right;font-weight:600;}
+  .footer-totals td{font-weight:bold;text-align:right;background:#f3f4f6;}
+  .ov-header{display:flex;justify-content:space-between;align-items:flex-start;}
+  .ov-left{flex:1;}
+  .ov-right{text-align:right;font-size:13px;}
+  .ov-num{font-size:14px;font-weight:bold;margin:8px 0;}
+  .ov-to{text-align:center;margin:18px 0;font-weight:bold;font-size:14px;line-height:1.8;}
+  .ov-body{font-size:13px;line-height:1.6;text-align:justify;}
+  .ov-table{width:100%;border-collapse:collapse;margin:12px 0;font-size:12px;}
+  .ov-table th,.ov-table td{border:1.5px solid #000;padding:8px;text-align:center;}
+  .ov-table th{background:#fff;font-weight:bold;}
+  .ov-total td{font-weight:bold;}
+  .sig{margin-top:30px;text-align:right;font-size:13px;}
+  .footer-camtel{position:absolute;bottom:8mm;left:18mm;right:18mm;text-align:center;font-size:9px;border-top:1px solid #000;padding-top:4px;}
+  .pv-header{display:flex;align-items:stretch;border:1px solid #000;}
+  .pv-h-logo{padding:6px;border-right:1px solid #000;display:flex;align-items:center;}
+  .pv-h-title{flex:1;display:flex;align-items:center;justify-content:center;font-weight:bold;font-size:13px;}
+  .pv-h-meta{padding:6px;border-left:1px solid #000;font-size:9px;line-height:1.4;}
+  .pv-title{text-align:center;font-weight:bold;font-size:14px;text-decoration:underline;margin:14px 0;}
+  .pv-body{font-size:12px;line-height:1.8;text-align:justify;}
+  .pv-line{border-bottom:1px dotted #000;display:inline-block;min-width:300px;padding:0 4px;font-weight:bold;}
+  .pv-sig-grid{display:grid;grid-template-columns:1fr 1fr;gap:30px;margin-top:30px;}
+  .pv-sig-grid .s{text-align:center;}
+  .pv-sig-grid .s span{display:block;font-style:italic;text-decoration:underline;font-weight:bold;margin-bottom:50px;}
+  .actions{position:sticky;top:0;background:#fff;padding:8px 0;z-index:10;border-bottom:1px solid #ddd;}
+</style>
+</head>
+<body>
+<header>
+  <h1>CAMTEL — Générateur de Documents Administratifs</h1>
+  <p>Saisissez les données → Générez automatiquement Fiche d'Imputation, Ordre de Virement &amp; Procès-Verbal en Word &amp; PDF (Format A4)</p>
+</header>
+
+<div class="container">
+  <div class="card">
+    <div class="tabs">
+      <div class="tab active" data-tab="fiche">Fiche d'Imputation</div>
+      <div class="tab" data-tab="virement">Ordre de Virement</div>
+      <div class="tab" data-tab="pv">Procès-Verbal</div>
+    </div>
+
+    <div class="panel active" id="panel-fiche">
+      <h2>Fiche d'Imputation — Saisie</h2>
+      <div class="row">
+        <div><label>Date</label><input type="text" id="f_date" value="30/09/2025"></div>
+        <div><label>Type de Pièce</label>
+          <select id="f_type"><option>BI BUFG</option><option>ABUFG</option></select>
+        </div>
+      </div>
+      <label>Numéro de Pièce</label><input type="text" id="f_num" value="75">
+
+      <div class="lineitems">
+        <strong style="font-size:12px;">Lignes Comptables (jusqu'à 8)</strong>
+        <div class="li" style="font-size:11px;font-weight:bold;color:#475569;">
+          <div>N° Compte</div><div>Libellé</div><div>Débit</div><div>Crédit</div><div></div>
+        </div>
+        <div id="fiche-lines"></div>
+        <button class="btn" style="padding:4px 10px;font-size:12px;margin-top:4px;" onclick="addFicheLine()">+ Ligne</button>
+      </div>
+
+      <div>
+        <button class="btn" onclick="renderFiche()">Aperçu</button>
+        <button class="btn green" onclick="downloadPDF('fiche-page','Fiche_Imputation')">PDF</button>
+        <button class="btn red" onclick="downloadWord('fiche')">Word</button>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-virement">
+      <h2>Ordre de Virement — Saisie</h2>
+      <label>N° (RRNF/SAAF)</label><input type="text" id="v_num" value="373">
+      <div class="row">
+        <div><label>Lieu</label><input type="text" id="v_lieu" value="Garoua"></div>
+        <div><label>Date</label><input type="text" id="v_date" value="03 SEPT 2025"></div>
+      </div>
+      <label>Compte à débiter</label><input type="text" id="v_compte_deb" value="10001 06870 95427670001-30">
+      <label>Bénéficiaire</label><input type="text" id="v_benef" value="ETS IKRAM">
+      <label>Numéro de compte bénéficiaire</label><input type="text" id="v_compte_ben" value="10033-05218-18016000191-35">
+      <label>Domiciliation</label><input type="text" id="v_dom" value="UBA BANK">
+      <label>Montant (FCFA)</label><input type="text" id="v_mt" value="1 936 305">
+      <label>Montant en lettres</label><textarea id="v_mt_lettres">un million neuf cent trente-six mille trois cent cinq</textarea>
+      <label>Référence Bon de Commande</label><input type="text" id="v_bc" value="248053 du 18/08/2025">
+      <label>Fournisseur (ETS)</label><input type="text" id="v_ets" value="ETS IKRAM">
+      <label>Objet de la commande</label><input type="text" id="v_objet" value="fourniture de matériel informatique">
+      <label>Signataire</label><input type="text" id="v_sig" value="TSAAM GAH Marcellin">
+
+      <div>
+        <button class="btn" onclick="renderVirement()">Aperçu</button>
+        <button class="btn green" onclick="downloadPDF('virement-page','Ordre_Virement')">PDF</button>
+        <button class="btn red" onclick="downloadWord('virement')">Word</button>
+      </div>
+    </div>
+
+    <div class="panel" id="panel-pv">
+      <h2>Procès-Verbal de Réception — Saisie</h2>
+      <label>Bon de Commande N°</label><input type="text" id="p_bc" value="248053">
+      <div class="row">
+        <div><label>Date BC</label><input type="text" id="p_date_bc" value="18 Août 2025"></div>
+        <div><label>Objet</label><input type="text" id="p_objet" value="fourniture de matériel informatique"></div>
+      </div>
+      <div class="row3">
+        <div><label>Année</label><input type="text" id="p_an" value="2025"></div>
+        <div><label>Jour</label><input type="text" id="p_jour" value="22"></div>
+        <div><label>Mois</label><input type="text" id="p_mois" value="août"></div>
+      </div>
+      <label>Heure</label><input type="text" id="p_heure" value="14heures">
+      <label>Président</label><input type="text" id="p_pres" value="TSAAM GAH Marcellin">
+      <label>Membre 1</label><input type="text" id="p_m1" value="PATEHALE KAKINE">
+      <label>Membre 2</label><input type="text" id="p_m2" value="TCHINGNABE EPSE YAYA">
+      <label>Membre 3</label><input type="text" id="p_m3" value="TAPSOU DJONKISSAM">
+      <label>Membre 4</label><input type="text" id="p_m4" value="DAIROU DAWAI">
+      <label>Rapporteur</label><input type="text" id="p_rap" value="NDI JOEL CHUYEH">
+      <label>Co-contractant</label><input type="text" id="p_coco" value="">
+      <label>Fournisseur</label><input type="text" id="p_four" value="ETS IKRAM">
+      <label>Lieu</label><input type="text" id="p_lieu" value="Garoua">
+      <label>Date du PV</label><input type="text" id="p_pv_date" value="22 août 2025">
+
+      <div>
+        <button class="btn" onclick="renderPV()">Aperçu</button>
+        <button class="btn green" onclick="downloadPDF('pv-page','Proces_Verbal')">PDF</button>
+        <button class="btn red" onclick="downloadWord('pv')">Word</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="actions">
+      <h2 style="margin:0;">Aperçu (A4)</h2>
+    </div>
+    <div class="preview-wrap" id="preview"></div>
+  </div>
+</div>
+
+<script>
+const camtelLogoSVG = `
+<svg class="logo-svg" viewBox="0 0 220 60" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="22" cy="30" r="18" fill="#0066B3"/>
+  <path d="M22 18 Q14 22 14 30 Q14 38 22 42 Q30 38 30 30 Q30 22 22 18 Z" fill="#fff"/>
+  <circle cx="22" cy="28" r="3" fill="#0066B3"/>
+  <path d="M16 34 Q22 38 28 34" stroke="#0066B3" stroke-width="2" fill="none"/>
+  <text x="50" y="40" font-family="Arial Black, Arial" font-size="30" font-weight="900" fill="#0066B3">camtel</text>
+  <text x="195" y="22" font-size="10" fill="#0066B3">R</text>
+</svg>`;
+
+document.querySelectorAll('.tab').forEach(t=>{
+  t.onclick=()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('panel-'+t.dataset.tab).classList.add('active');
+    if(t.dataset.tab==='fiche')renderFiche();
+    if(t.dataset.tab==='virement')renderVirement();
+    if(t.dataset.tab==='pv')renderPV();
+  };
+});
+
+let ficheLines=[
+  {acct:'4011 7270',lib:'REGLEMENT VIRT FAV ETS IKRAM UBA ABBIA Motif: RGMT BC N°248053 18/08/2',deb:'2 443 433',cre:''},
+  {acct:'4441 0022',lib:'TVA / VIRT FAV ETS IKRAM UBA ABBIA Motif: RGMT BC N°248053 18/08/2',deb:'',cre:'394 433'},
+  {acct:'4471 0100',lib:'IR/ VIRT FAV ETS IKRAM UBA ABBIA Motif: RGMT BC N°248053 18/08/2',deb:'',cre:'112 695'},
+  {acct:'5211 0324',lib:'VIRT FAV ETS IKRAM UBA ABBIA Motif: RGMT BC N°248053 18/08/2',deb:'',cre:'1 936 305'}
+];
+
+function renderFicheLines(){
+  const c=document.getElementById('fiche-lines');c.innerHTML='';
+  ficheLines.forEach((l,i)=>{
+    c.innerHTML+=`<div class="li">
+      <input value="${l.acct}" onchange="ficheLines[${i}].acct=this.value">
+      <input value="${l.lib}" onchange="ficheLines[${i}].lib=this.value">
+      <input value="${l.deb}" onchange="ficheLines[${i}].deb=this.value">
+      <input value="${l.cre}" onchange="ficheLines[${i}].cre=this.value">
+      <button class="btn red" style="padding:4px 8px;font-size:11px;margin:0;" onclick="ficheLines.splice(${i},1);renderFicheLines()">x</button>
+    </div>`;
+  });
+}
+function addFicheLine(){ficheLines.push({acct:'',lib:'',deb:'',cre:''});renderFicheLines();}
+renderFicheLines();
+
+function sumAmt(arr,key){
+  let s=0;arr.forEach(l=>{let n=parseFloat((l[key]||'').replace(/[\s,]/g,''));if(!isNaN(n))s+=n;});
+  return s.toLocaleString('fr-FR').replace(/,/g,' ');
+}
+
+function renderFiche(){
+  const date=document.getElementById('f_date').value;
+  const type=document.getElementById('f_type').value;
+  const num=document.getElementById('f_num').value;
+  let rows='';
+  for(let i=0;i<Math.max(20,ficheLines.length);i++){
+    const l=ficheLines[i]||{acct:'',lib:'',deb:'',cre:''};
+    rows+=`<tr style="height:28px;"><td class="acct">${l.acct||''}</td><td>${l.lib||''}</td><td class="amt">${l.deb||''}</td><td class="amt">${l.cre||''}</td></tr>`;
+  }
+  const totD=sumAmt(ficheLines,'deb'),totC=sumAmt(ficheLines,'cre');
+  const html=`<div class="page" id="fiche-page"><div class="watermark">CAMTEL</div><div class="logo-row">${camtelLogoSVG}</div><div class="doc-title">FICHE D'IMPUTATION</div><div class="doc-meta"><div><strong>DATE :</strong> ${date}</div><div><strong>PIECE N°</strong> ${type} <span style="border-bottom:1px solid #000;padding:0 8px;">${num}</span></div></div><table class="imp-table"><thead><tr><th style="width:22%">N° DE COMPTE</th><th>LIBELLES</th><th style="width:15%">DEBIT</th><th style="width:15%">CREDIT</th></tr></thead><tbody>${rows}</tbody><tfoot><tr class="footer-totals"><td colspan="2"></td><td>${totD}</td><td>${totC}</td></tr></tfoot></table></div>`;
+  document.getElementById('preview').innerHTML=html;
+}
+
+function renderVirement(){
+  const v=k=>document.getElementById(k).value;
+  const html=`<div class="page" id="virement-page"><div class="watermark">CAMTEL</div><div class="ov-header"><div class="ov-left">${camtelLogoSVG}<div class="logo-sub"><em>Représentation Régionale<br>du Nord<br>Business Unit Fixe</em></div><div class="ov-num">N° ${v('v_num')} /RRNF/SAAF</div></div><div class="ov-right">${v('v_lieu')}, le<br><strong>${v('v_date')}</strong></div></div><div class="ov-to">MONSIEUR LE REPRÉSENTANT RÉGIONAL CAMTEL<br>DE LA BUSINESS UNIT FIXE POUR LE NORD,<br>A<br>MONSIEUR LE CHEF D'AGENCE BICEC DE GAROUA.</div><p style="font-size:13px;"><strong><u>Objet</u> :</strong> Ordre de virement.</p><div class="ov-body"><p>Monsieur le Chef d'Agence,</p><p>Par le débit de notre compte N° ${v('v_compte_deb')}, nous avons l'honneur de vous demander de bien vouloir effectuer le virement en faveur des ${v('v_ets')} selon le tableau ci-après :</p><table class="ov-table"><thead><tr><th>Bénéficiaire</th><th>Numéro de compte</th><th>Domiciliation</th><th>Montant</th></tr></thead><tbody><tr><td>${v('v_benef')}</td><td>${v('v_compte_ben')}</td><td>${v('v_dom')}</td><td>${v('v_mt')}</td></tr><tr class="ov-total"><td colspan="3" style="text-align:left;"><strong>TOTAL</strong></td><td><strong>${v('v_mt')}</strong></td></tr></tbody></table><p>Cette somme de <strong>${v('v_mt_lettres')} Francs</strong> représente le règlement du BC N° ${v('v_bc')} des ${v('v_ets')} relatif à la ${v('v_objet')}.</p><p>Veuillez recevoir, Monsieur le chef d'Agence, L'assurance de notre parfaite considération.</p></div><div class="sig"><strong>Le Représentant<br>Régional du Nord<br>BUSINESS UNIT FIXE</strong><div style="height:60px;"></div><strong>${v('v_sig')}</strong></div><div class="footer-camtel">S.A. CAMEROON TELECOMMUNICATIONS (CAMTEL)<br>Capital social : 67 904 430 000 FCFA, B.P. : 27 Garoua-Cameroun<br>N° RCCM : 2000 Q 255, N° Contribuable M 0998 0000 9853 S<br>TELEPHONE : (237) 222 27 19 55  Fax (237) 222 27 28 90</div></div>`;
+  document.getElementById('preview').innerHTML=html;
+}
+
+function renderPV(){
+  const v=k=>document.getElementById(k).value;
+  const html=`<div class="page" id="pv-page"><div class="watermark">CAMTEL</div><div class="pv-header"><div class="pv-h-logo">${camtelLogoSVG}</div><div class="pv-h-title">PROCES-VERBAL DE RECEPTION</div><div class="pv-h-meta">Code : EN-DAP-14<br>Version : 0<br>Date : 30/08/2024<br>Page : 1/2</div></div><div class="pv-title">PROCES VERBAL DE RECEPTION DEFINITIVE</div><div class="pv-body"><p>Bon de Commande <strong>n°${v('p_bc')}</strong> du <strong>${v('p_date_bc')}</strong>, Pour ${v('p_objet')}.</p><p>L'an deux mille ${v('p_an')}, le ${v('p_jour')} du mois d'${v('p_mois')} ${v('p_an')} à partir de ${v('p_heure')}.</p><p>Nous soussignés</p><p>M ...... <span class="pv-line">${v('p_pres')}</span> ........[Le Président ou son représentant]</p><p>M ...... <span class="pv-line">${v('p_m1')}</span> ........[Membre]</p><p>Mme ...... <span class="pv-line">${v('p_m2')}</span> ........[Membre]</p><p>M ...... <span class="pv-line">${v('p_m3')}</span> ........[Membre]</p><p>M ...... <span class="pv-line">${v('p_m4')}</span> ........[Membre]</p><p>M ...... <span class="pv-line">${v('p_rap')}</span> ........[Rapporteur]</p><p>Accompagnés de :</p><p>M ...... <span class="pv-line">${v('p_coco')}</span> ........[Cocontractant]</p><p>En présence de Cocontractant dûment convoqué, sommes rendus sur les lieux pour examiner et vérifier les prestations réalisées par <strong>${v('p_four')}</strong> dans le cadre du Bon de Commande ci-dessus mentionné à la page n°${v('p_bc')}.</p><p>Au terme de cet examen et tenant compte du bordereau de livraison signée par le magasinier joint, nous déclarons que :</p><p>La réception Provisoire est <strong>prononcée sans réserve</strong>, avec effet à la date du ${v('p_jour')} ${v('p_mois')} ${v('p_an')}.</p><p style="text-align:right;">Fait à ${v('p_lieu')}, le ${v('p_pv_date')}, en un original</p></div><div class="pv-sig-grid"><div class="s"><span>Cocontractant</span></div><div class="s"><span>Rapporteur</span></div><div class="s"><span>Membre</span>${v('p_m1')}</div><div class="s"><span>Membre</span>${v('p_m2')}</div><div class="s"><span>Membre</span>${v('p_m3')}</div><div class="s"><span>Le Président ou son Représentant</span>${v('p_pres')}</div></div><div class="footer-camtel">SA CAMEROON TELECOMMUNICATIONS (CAMTEL)<br>Capital social : 67 904 430 000 FCFA, BP : 1571 Yaoundé-Cameroun<br>N° RCCM : 2000 Q 255, N° Contribuable M 0998 0000 9853 s<br>TELEPHONE : (237) 222 230 303 — Site Web : www.camtel.cm</div></div>`;
+  document.getElementById('preview').innerHTML=html;
+}
+
+function downloadPDF(pageId,filename){
+  const el=document.getElementById(pageId);
+  if(!el){alert('Cliquez d\'abord sur Aperçu');return;}
+  const opt={margin:0,filename:filename+'.pdf',image:{type:'jpeg',quality:0.98},html2canvas:{scale:2,useCORS:true},jsPDF:{unit:'mm',format:'a4',orientation:'portrait'}};
+  html2pdf().set(opt).from(el).save();
+}
+
+async function downloadWord(type){
+  const {Document,Packer,Paragraph,TextRun,Table,TableRow,TableCell,WidthType,AlignmentType,PageOrientation,Header,Footer}=docx;
+  const camtelHeaderPara=new Paragraph({alignment:AlignmentType.LEFT,children:[new TextRun({text:'camtel',bold:true,size:48,color:'0066B3'})]});
+  let docChildren=[];
+
+  if(type==='fiche'){
+    const date=document.getElementById('f_date').value;
+    const ttype=document.getElementById('f_type').value;
+    const num=document.getElementById('f_num').value;
+    docChildren.push(camtelHeaderPara);
+    docChildren.push(new Paragraph({alignment:AlignmentType.CENTER,spacing:{before:300,after:200},children:[new TextRun({text:"FICHE D'IMPUTATION",bold:true,size:40})]}));
+    docChildren.push(new Paragraph({children:[new TextRun({text:`DATE : ${date}                              PIECE N°  ${ttype}  ${num}`,bold:true,size:22})]}));
+    const headerRow=new TableRow({tableHeader:true,children:[
+      new TableCell({width:{size:25,type:WidthType.PERCENTAGE},children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'N° DE COMPTE',bold:true})]})]}),
+      new TableCell({width:{size:45,type:WidthType.PERCENTAGE},children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'LIBELLES',bold:true})]})]}),
+      new TableCell({width:{size:15,type:WidthType.PERCENTAGE},children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'DEBIT',bold:true})]})]}),
+      new TableCell({width:{size:15,type:WidthType.PERCENTAGE},children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'CREDIT',bold:true})]})]})
+    ]});
+    const dataRows=ficheLines.map(l=>new TableRow({children:[
+      new TableCell({children:[new Paragraph({children:[new TextRun({text:l.acct,font:'Courier New'})]})]}),
+      new TableCell({children:[new Paragraph({children:[new TextRun({text:l.lib,size:18})]})]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.RIGHT,children:[new TextRun({text:l.deb,bold:true})]})]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.RIGHT,children:[new TextRun({text:l.cre,bold:true})]})]}),
+    ]}));
+    for(let i=0;i<10;i++){
+      dataRows.push(new TableRow({children:[new TableCell({children:[new Paragraph('')]}),new TableCell({children:[new Paragraph('')]}),new TableCell({children:[new Paragraph('')]}),new TableCell({children:[new Paragraph('')]})]}));
+    }
+    const totD=sumAmt(ficheLines,'deb'),totC=sumAmt(ficheLines,'cre');
+    dataRows.push(new TableRow({children:[
+      new TableCell({children:[new Paragraph('')]}),
+      new TableCell({children:[new Paragraph('')]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.RIGHT,children:[new TextRun({text:totD,bold:true})]})]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.RIGHT,children:[new TextRun({text:totC,bold:true})]})]}),
+    ]}));
+    docChildren.push(new Table({rows:[headerRow,...dataRows],width:{size:100,type:WidthType.PERCENTAGE}}));
+  }
+  else if(type==='virement'){
+    const v=k=>document.getElementById(k).value;
+    docChildren.push(camtelHeaderPara);
+    docChildren.push(new Paragraph({children:[new TextRun({text:'Représentation Régionale du Nord',italics:true,size:20})]}));
+    docChildren.push(new Paragraph({children:[new TextRun({text:'Business Unit Fixe',italics:true,size:20})]}));
+    docChildren.push(new Paragraph({alignment:AlignmentType.RIGHT,children:[new TextRun({text:`${v('v_lieu')}, le ${v('v_date')}`,bold:true})]}));
+    docChildren.push(new Paragraph({children:[new TextRun({text:`N° ${v('v_num')} /RRNF/SAAF`,bold:true,size:24})]}));
+    docChildren.push(new Paragraph({alignment:AlignmentType.CENTER,spacing:{before:300,after:200},children:[
+      new TextRun({text:'MONSIEUR LE REPRÉSENTANT RÉGIONAL CAMTEL',bold:true,break:1}),
+      new TextRun({text:'DE LA BUSINESS UNIT FIXE POUR LE NORD,',bold:true,break:1}),
+      new TextRun({text:'A',bold:true,break:1}),
+      new TextRun({text:"MONSIEUR LE CHEF D'AGENCE BICEC DE GAROUA.",bold:true,break:1})
+    ]}));
+    docChildren.push(new Paragraph({children:[new TextRun({text:'Objet : ',bold:true,underline:{}}),new TextRun({text:'Ordre de virement.'})]}));
+    docChildren.push(new Paragraph({children:[new TextRun({text:"Monsieur le Chef d'Agence,"})]}));
+    docChildren.push(new Paragraph({children:[new TextRun({text:`Par le débit de notre compte N° ${v('v_compte_deb')}, nous avons l'honneur de vous demander de bien vouloir effectuer le virement en faveur des ${v('v_ets')} selon le tableau ci-après :`})]}));
+    const ovHeader=new TableRow({tableHeader:true,children:[
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'Bénéficiaire',bold:true})]})]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'Numéro de compte',bold:true})]})]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'Domiciliation',bold:true})]})]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'Montant',bold:true})]})]}),
+    ]});
+    const ovData=new TableRow({children:[
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun(v('v_benef'))]})]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun(v('v_compte_ben'))]})]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun(v('v_dom'))]})]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun(v('v_mt'))]})]}),
+    ]});
+    const ovTotal=new TableRow({children:[
+      new TableCell({columnSpan:3,children:[new Paragraph({children:[new TextRun({text:'TOTAL',bold:true})]})]}),
+      new TableCell({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:v('v_mt'),bold:true})]})]}),
+    ]});
+    docChildren.push(new Table({rows:[ovHeader,ovData,ovTotal],width:{size:100,type:WidthType.PERCENTAGE}}));
+    docChildren.push(new Paragraph({spacing:{before:200},children:[new TextRun(`Cette somme de ${v('v_mt_lettres')} Francs représente le règlement du BC N° ${v('v_bc')} des ${v('v_ets')} relatif à la ${v('v_objet')}.`)]}));
+    docChildren.push(new Paragraph({children:[new TextRun("Veuillez recevoir, Monsieur le chef d'Agence, L'assurance de notre parfaite considération.")]}));
+    docChildren.push(new Paragraph({alignment:AlignmentType.RIGHT,spacing:{before:400},children:[new TextRun({text:'Le Représentant Régional du Nord BUSINESS UNIT FIXE',bold:true})]}));
+    docChildren.push(new Paragraph({alignment:AlignmentType.RIGHT,spacing:{before:1000},children:[new TextRun({text:v('v_sig'),bold:true})]}));
+  }
+  else if(type==='pv'){
+    const v=k=>document.getElementById(k).value;
+    docChildren.push(camtelHeaderPara);
+    docChildren.push(new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'PROCES-VERBAL DE RECEPTION',bold:true,size:28})]}));
+    docChildren.push(new Paragraph({alignment:AlignmentType.CENTER,spacing:{before:200,after:200},children:[new TextRun({text:'PROCES VERBAL DE RECEPTION DEFINITIVE',bold:true,underline:{},size:26})]}));
+    docChildren.push(new Paragraph({children:[new TextRun({text:`Bon de Commande n°${v('p_bc')} du ${v('p_date_bc')}, Pour ${v('p_objet')}.`})]}));
+    docChildren.push(new Paragraph({children:[new TextRun(`L'an deux mille ${v('p_an')}, le ${v('p_jour')} du mois d'${v('p_mois')} ${v('p_an')} à partir de ${v('p_heure')}.`)]}));
+    docChildren.push(new Paragraph({children:[new TextRun('Nous soussignés')]}));
+    [['Le Président ou son représentant',v('p_pres')],['Membre',v('p_m1')],['Membre',v('p_m2')],['Membre',v('p_m3')],['Membre',v('p_m4')],['Rapporteur',v('p_rap')]].forEach(([role,name])=>{
+      docChildren.push(new Paragraph({children:[new TextRun(`M ...... `),new TextRun({text:name,bold:true,underline:{}}),new TextRun(` ............[${role}]`)]}));
+    });
+    docChildren.push(new Paragraph({children:[new TextRun('Accompagnés de :')]}));
+    docChildren.push(new Paragraph({children:[new TextRun(`M ...... `),new TextRun({text:v('p_coco')||'_______________________',bold:true,underline:{}}),new TextRun(' ............[Cocontractant]')]}));
+    docChildren.push(new Paragraph({children:[new TextRun(`En présence de Cocontractant dûment convoqué, sommes rendus sur les lieux pour examiner et vérifier les prestations réalisées par `),new TextRun({text:v('p_four'),bold:true}),new TextRun(` dans le cadre du Bon de Commande ci-dessus mentionné à la page n°${v('p_bc')}.`)]}));
+    docChildren.push(new Paragraph({children:[new TextRun('Au terme de cet examen et tenant compte du bordereau de livraison signée par le magasinier joint, nous déclarons que :')]}));
+    docChildren.push(new Paragraph({children:[new TextRun('La réception Provisoire est '),new TextRun({text:'prononcée sans réserve',bold:true}),new TextRun(`, avec effet à la date du ${v('p_jour')} ${v('p_mois')} ${v('p_an')}.`)]}));
+    docChildren.push(new Paragraph({alignment:AlignmentType.RIGHT,children:[new TextRun(`Fait à ${v('p_lieu')}, le ${v('p_pv_date')}, en un original`)]}));
+  }
+
+  const doc=new Document({
+    sections:[{
+      properties:{page:{size:{orientation:PageOrientation.PORTRAIT,width:11906,height:16838},margin:{top:1000,right:1000,bottom:1000,left:1000}}},
+      headers:{default:new Header({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'CAMTEL',bold:true,size:140,color:'E6F0F8'})]})]})},
+      footers:{default:new Footer({children:[new Paragraph({alignment:AlignmentType.CENTER,children:[new TextRun({text:'S.A. CAMEROON TELECOMMUNICATIONS (CAMTEL) — B.P. 1571 Yaoundé / 27 Garoua — Tel: (237) 222 230 303',size:14,italics:true})]})]})},
+      children:docChildren
+    }]
+  });
+
+  const blob=await Packer.toBlob(doc);
+  saveAs(blob,(type==='fiche'?'Fiche_Imputation':type==='virement'?'Ordre_Virement':'Proces_Verbal')+'.docx');
+}
+
+renderFiche();
+</script>
+</body>
+</html>
